@@ -60,18 +60,27 @@ class FaceMatcher:
 
         best_match = None
         best_score = -1.0
+        second_best = -1.0
 
         for student_id, data in self.registered_db.items():
             sim = self._best_similarity(query_embedding, data["embeddings"])
             if sim > best_score:
+                second_best = best_score
                 best_score = sim
                 best_match = {
                     "student_id": student_id,
                     "name": data["name"],
                     "confidence": sim,
                 }
+            elif sim > second_best:
+                second_best = sim
 
+        # Require both absolute threshold and a margin to the runner-up
         if best_match is None or best_score < self.threshold:
+            return None
+
+        if (best_score - second_best) < Config.MIN_MATCH_MARGIN:
+            # Ambiguous match — too close to call
             return None
 
         # Twin resolution
@@ -160,6 +169,30 @@ class FaceMatcher:
                 continue
             if sim_score < self.threshold:
                 break
+
+            # Check ambiguity among currently unassigned students for this query
+            row = sim_matrix[qi]
+            unassigned_idxs = [j for j in range(num_students) if j not in assigned_students]
+            if not unassigned_idxs:
+                continue
+            # Best and second-best among unassigned students
+            vals = row[unassigned_idxs]
+            if vals.size == 0:
+                continue
+            # indices relative to unassigned_idxs
+            rel_sorted = np.argsort(vals)[::-1]
+            best_rel = rel_sorted[0]
+            best_idx = unassigned_idxs[best_rel]
+            best_val = row[best_idx]
+            second_val = vals[rel_sorted[1]] if vals.size > 1 else -1.0
+
+            # Only accept if this pair corresponds to the best unassigned student
+            if best_idx != si:
+                continue
+
+            # Require margin between best and runner-up to avoid ambiguous assignments
+            if (best_val - second_val) < Config.MIN_MATCH_MARGIN:
+                continue
 
             sid = student_ids[si]
             match = {

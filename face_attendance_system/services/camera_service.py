@@ -47,33 +47,48 @@ class CameraService:
         Returns:
             True if camera opened successfully.
         """
-        idx = camera_index if camera_index is not None else self.camera_index
-
         # Release any existing capture
         if self.cap is not None:
             self.release()
 
-        self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+        candidates = []
+        if camera_index is not None:
+            candidates.append(camera_index)
+        else:
+            candidates.append(self.camera_index)
 
-        if not self.cap.isOpened():
-            # Try without DirectShow backend
-            self.cap = cv2.VideoCapture(idx)
+        if candidates[0] != 0:
+            candidates.append(0)
 
-        if not self.cap.isOpened():
-            print(f"[Camera] Failed to open camera at index {idx}.")
-            self.cap = None
-            return False
+        last_error = None
+        for idx in candidates:
+            try:
+                self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+                if not self.cap.isOpened():
+                    self.cap = cv2.VideoCapture(idx)
 
-        # Set reasonable resolution
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                if not self.cap.isOpened():
+                    last_error = f"camera index {idx}"
+                    continue
 
-        # Warm-up: discard a few initial frames (often dark/corrupt)
-        for _ in range(5):
-            self.cap.read()
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-        print(f"[Camera] Opened camera at index {idx}.")
-        return True
+                for _ in range(3):
+                    ret, _ = self.cap.read()
+                    if ret:
+                        break
+
+                self.camera_index = idx
+                print(f"[Camera] Opened camera at index {idx}.")
+                return True
+            except Exception as exc:
+                last_error = str(exc)
+                self.cap = None
+
+        print(f"[Camera] Failed to open camera. Tried: {candidates}. Last error: {last_error}")
+        self.cap = None
+        return False
 
     def read_frame(self) -> np.ndarray | None:
         """

@@ -31,7 +31,12 @@ class Config:
     # ──────────────────────────────────────────────
     # Face Matching
     # ──────────────────────────────────────────────
-    SIMILARITY_THRESHOLD: float = 0.6  # cosine similarity cutoff
+    # Cosine similarity cutoff for accepting a match (higher = stricter)
+    SIMILARITY_THRESHOLD: float = 0.72  # was 0.6, increased to reduce false positives
+
+    # Minimum required margin between best and second-best matches
+    # to avoid ambiguous assignments (values in cosine similarity).
+    MIN_MATCH_MARGIN: float = 0.06
 
     # ──────────────────────────────────────────────
     # Registration

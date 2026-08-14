@@ -28,3 +28,27 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Model files (large binaries)
+*.pt
+*.pth
+*.onnx
+*.tflite
+
+# Dataset / storage / generated images
+face_attendance_system/storage/
+face_attendance_system/storage/*
+face_attendance_system/storage/registered_faces/
+face_attendance_system/storage/session_snapshots/
+face_attendance_system/storage/session_snapshots/*
+
+# Registered faces (images)
+face_attendance_system/storage/registered_faces/
+
+# Local snapshots, captures
+*.jpg
+*.jpeg
+*.png
+
+# models directory (optional large models)
+models/
