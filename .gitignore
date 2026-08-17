@@ -1,9 +1,9 @@
-# Virtual environment
+# Virtual environments
 .venv/
 venv/
 env/
 
-# Python
+# Python bytecode
 __pycache__/
 *.py[cod]
 *$py.class
@@ -12,7 +12,7 @@ dist/
 build/
 *.egg
 
-# IDE
+# IDE / editors
 .vscode/
 .idea/
 *.swp
@@ -22,33 +22,29 @@ build/
 .DS_Store
 Thumbs.db
 
-# Environment variables
+# Environment files
 .env
 .env.local
 
 # Logs
 *.log
 
-# Model files (large binaries)
+# Model weights / binaries (auto-downloaded on first run)
 *.pt
 *.pth
 *.onnx
 *.tflite
+# Keep the model directory itself, just ignore the binaries inside it
+!models/.gitkeep
+# MiniFASNetV2 anti-spoofing model is converted locally and committed (1.7MB)
+!models/MiniFASNetV2.onnx
 
-# Dataset / storage / generated images
-face_attendance_system/storage/
-face_attendance_system/storage/*
-face_attendance_system/storage/registered_faces/
-face_attendance_system/storage/session_snapshots/
-face_attendance_system/storage/session_snapshots/*
+# Storage: user data (face DB, attendance records, snapshots, registered faces)
+storage/*.pkl
+storage/registered_faces/
+storage/session_snapshots/
 
-# Registered faces (images)
-face_attendance_system/storage/registered_faces/
-
-# Local snapshots, captures
-*.jpg
-*.jpeg
-*.png
-
-# models directory (optional large models)
-models/
+# Generated / captured images
+storage/**/*.jpg
+storage/**/*.jpeg
+storage/**/*.png
