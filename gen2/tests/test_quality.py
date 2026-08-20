@@ -61,28 +61,41 @@ class TestQuality:
         assert not result.accepted
         assert "FACE_TOO_SMALL" in result.reason
 
-    def test_too_dark(self, assessor):
-        """A very dark face → REJECT with TOO_DARK."""
+    def test_too_dark_advisory(self, assessor):
+        """A dark face with texture → TOO_DARK is advisory (accepted, warning)."""
         face = self._make_textured_face(brightness=10)
         det = make_detection(face_image=face)
         result = assessor.assess(det)
-        assert not result.accepted
-        assert "TOO_DARK" in result.reason
+        # Advisory: accepted but TOO_DARK in warnings
+        assert "TOO_DARK" in result.details.get("warnings", [])
+        # Face is still usable if overall score is high enough (texture compensates)
 
-    def test_overexposed(self, assessor):
-        """A very bright face → REJECT with OVEREXPOSED."""
+    def test_truly_dark_rejected(self, assessor):
+        """A completely dark, tiny, low-confidence face → rejected."""
+        face = np.full((50, 50, 3), 5, dtype=np.uint8)  # tiny + no texture + dark
+        det = Detection(
+            bbox=(100, 100, 150, 150),  # 50x50 — just above min_face_size
+            confidence=0.5,
+            landmarks=np.array([
+                [120, 120], [130, 120], [125, 130], [122, 140], [128, 140],
+            ], dtype=np.float32),
+            cropped_face=face,
+        )
+        result = assessor.assess(det)
+        assert not result.accepted
+
+    def test_overexposed_advisory(self, assessor):
+        """A bright face with texture → OVEREXPOSED is advisory."""
         face = self._make_textured_face(brightness=250)
         det = make_detection(face_image=face)
         result = assessor.assess(det)
-        assert not result.accepted
-        assert "OVEREXPOSED" in result.reason
+        assert "OVEREXPOSED" in result.details.get("warnings", [])
 
-    def test_low_detection_confidence(self, assessor):
-        """Below min_detector_confidence → REJECT."""
+    def test_low_detection_confidence_advisory(self, assessor):
+        """Low detector confidence → advisory (not a hard reject)."""
         det = make_detection(confidence=0.1)
         result = assessor.assess(det)
-        assert not result.accepted
-        assert "LOW_DETECTION_CONFIDENCE" in result.reason
+        assert "LOW_DETECTION_CONFIDENCE" in result.details.get("warnings", [])
 
     def test_landmark_failure(self, assessor):
         """NaN landmarks → REJECT with LANDMARK_FAILURE."""

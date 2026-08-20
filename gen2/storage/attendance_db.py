@@ -73,9 +73,27 @@ class AttendanceDB:
         FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS subjects (
+        subject_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        code TEXT DEFAULT '',
+        created_at TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_checks_session ON checks(session_id);
     CREATE INDEX IF NOT EXISTS idx_attendance_session ON attendance(session_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+    """
+
+    # ─── Subject Migrations ───
+    # Add subjects table if upgrading from an older schema
+    SUBJECT_MIGRATION = """
+    CREATE TABLE IF NOT EXISTS subjects (
+        subject_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        code TEXT DEFAULT '',
+        created_at TEXT NOT NULL
+    );
     """
 
     def __init__(self, db_path: Path | str | None = None):
@@ -298,6 +316,102 @@ class AttendanceDB:
                 (session_id,)
             ).fetchall()
             return [r["note"] for r in rows]
+        finally:
+            conn.close()
+
+    # ─── Subjects CRUD ───
+
+    def add_subject(self, name: str, code: str = "") -> dict | None:
+        """Add a new subject. Returns the subject dict or None on conflict."""
+        import uuid as _uuid
+        subject_id = str(_uuid.uuid4())[:12]
+        now = _now_iso()
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT INTO subjects (subject_id, name, code, created_at) VALUES (?, ?, ?, ?)",
+                (subject_id, name.strip(), code.strip(), now)
+            )
+            conn.commit()
+            logger.info(f"Added subject: {name} ({code})")
+            return {"subject_id": subject_id, "name": name.strip(),
+                    "code": code.strip(), "created_at": now}
+        except sqlite3.IntegrityError as e:
+            logger.warning(f"Subject add failed: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def get_all_subjects(self) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM subjects ORDER BY name"
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_subject(self, subject_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM subjects WHERE subject_id = ?", (subject_id,)
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def update_subject(self, subject_id: str, name: str | None = None,
+                       code: str | None = None) -> bool:
+        conn = self._connect()
+        try:
+            if name is not None and code is not None:
+                conn.execute(
+                    "UPDATE subjects SET name=?, code=? WHERE subject_id=?",
+                    (name.strip(), code.strip(), subject_id)
+                )
+            elif name is not None:
+                conn.execute(
+                    "UPDATE subjects SET name=? WHERE subject_id=?",
+                    (name.strip(), subject_id)
+                )
+            elif code is not None:
+                conn.execute(
+                    "UPDATE subjects SET code=? WHERE subject_id=?",
+                    (code.strip(), subject_id)
+                )
+            conn.commit()
+            return conn.total_changes > 0
+        finally:
+            conn.close()
+
+    def delete_subject(self, subject_id: str) -> bool:
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "DELETE FROM subjects WHERE subject_id=?", (subject_id,)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def subject_exists(self, name: str, code: str = "") -> bool:
+        """Check if a subject with the same name or code already exists."""
+        conn = self._connect()
+        try:
+            if code:
+                row = conn.execute(
+                    "SELECT 1 FROM subjects WHERE LOWER(name)=LOWER(?) OR LOWER(code)=LOWER(?)",
+                    (name, code)
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT 1 FROM subjects WHERE LOWER(name)=LOWER(?)",
+                    (name,)
+                ).fetchone()
+            return row is not None
         finally:
             conn.close()
 

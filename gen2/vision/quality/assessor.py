@@ -156,21 +156,36 @@ class FaceQualityAssessor:
         details["overall_score"] = overall
 
         # ── Decision ──
-        if reasons:
+        # Hard-reject only for critical issues that make the face unusable.
+        # Quality issues (blur, brightness, contrast, pose) are advisory —
+        # they lower the overall score but don't automatically reject.
+        # A sharp, well-lit face that's slightly below the blur threshold
+        # should still pass if the overall score is above min_overall.
+        HARD_REJECT_REASONS = {"FACE_TOO_SMALL", "LANDMARK_FAILURE", "CROP_EMPTY"}
+        hard_reasons = [r for r in reasons if r in HARD_REJECT_REASONS]
+        soft_reasons = [r for r in reasons if r not in HARD_REJECT_REASONS]
+
+        if hard_reasons:
             return QualityResult(
                 overall_score=overall,
                 accepted=False,
-                reason=reasons[0],
+                reason=hard_reasons[0],
                 details=details,
             )
 
         if overall < self.min_overall:
+            # If the only issues are soft quality issues, report them
+            reason = soft_reasons[0] if soft_reasons else "LOW_QUALITY"
             return QualityResult(
                 overall_score=overall,
                 accepted=False,
-                reason="LOW_QUALITY",
+                reason=reason,
                 details=details,
             )
+
+        # Accepted — but still note any soft issues in the details
+        if soft_reasons:
+            details["warnings"] = soft_reasons
 
         return QualityResult(
             overall_score=overall,

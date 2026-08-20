@@ -55,7 +55,7 @@ with st.sidebar:
     st.markdown("### 🎓 gen2 Attendance")
     st.caption("YuNet + ArcFace + MiniFASNet")
     st.markdown("---")
-    page = st.radio("Navigation", ["Register", "Attendance", "Gallery", "Reports"],
+    page = st.radio("Navigation", ["Register", "Attendance", "Subjects", "Gallery", "Reports"],
                     index=0, label_visibility="collapsed")
     st.markdown("---")
 
@@ -80,6 +80,10 @@ if page == "Register":
 elif page == "Attendance":
     from gen2.ui.attendance_page import render_attendance_page
     render_attendance_page(rt)
+
+elif page == "Subjects":
+    from gen2.ui.subjects_page import render_subjects_page
+    render_subjects_page(rt)
 
 elif page == "Gallery":
     from gen2.ui.gallery_page import render_gallery_page

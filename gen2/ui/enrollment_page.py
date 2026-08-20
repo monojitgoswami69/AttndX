@@ -75,7 +75,7 @@ def render_enrollment_page(rt):
             with cols[i % 5]:
                 rgb = cv2.cvtColor(cap, cv2.COLOR_BGR2RGB)
                 st.image(rgb, caption=f"#{i+1} Q:{q.overall_score:.0%}",
-                         use_container_width=True)
+                         width="stretch")
 
     # Register button
     st.markdown("---")
@@ -85,7 +85,7 @@ def render_enrollment_page(rt):
     c1, c2 = st.columns([3, 1])
     with c1:
         if st.button("✅ Enroll Student", type="primary",
-                      disabled=not can_register, use_container_width=True):
+                      disabled=not can_register, width="stretch"):
             with st.spinner("Processing embeddings..."):
                 result = enroll_svc.enroll(
                     name=name.strip(),
@@ -107,7 +107,7 @@ def render_enrollment_page(rt):
                 for issue in result.issues:
                     st.warning(f"⚠️ {issue}")
     with c2:
-        if st.button("🔄 Reset", use_container_width=True):
+        if st.button("🔄 Reset", width="stretch"):
             st.session_state.enr_captures = []
             st.session_state.enr_qualities = []
             st.rerun()

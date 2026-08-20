@@ -69,17 +69,20 @@ embedding:
 
 # ─── Quality Assessment ───
 quality:
-  min_face_size: 48                       # px; below → FACE_TOO_SMALL
-  blur_threshold: 40.0                    # Laplacian variance; below → TOO_BLURRY
-  brightness_min: 35.0                    # mean pixel; below → TOO_DARK
-  brightness_max: 225.0                   # above → OVEREXPOSED
-  contrast_min: 20.0                      # std dev of gray; below → LOW_CONTRAST
-  max_pose_yaw: 35.0                      # degrees; estimated from landmarks
-  max_pose_pitch: 35.0
-  max_pose_roll: 35.0
-  min_detector_confidence: 0.5            # below → LOW_DETECTION_CONFIDENCE
+  min_face_size: 48                       # px; below → FACE_TOO_SMALL (hard reject)
+  blur_threshold: 15.0                    # Laplacian variance; advisory (soft)
+  brightness_min: 30.0                    # mean pixel; below → TOO_DARK (advisory)
+  brightness_max: 230.0                   # above → OVEREXPOSED (advisory)
+  contrast_min: 10.0                      # std dev of gray; below → LOW_CONTRAST (advisory)
+  max_pose_yaw: 45.0                      # degrees; estimated from landmarks (advisory)
+  max_pose_pitch: 45.0
+  max_pose_roll: 45.0
+  min_detector_confidence: 0.5            # below → advisory
   # Overall acceptance threshold (0-1); weighted combination
-  min_overall_score: 0.45                 # below → rejected at enrollment
+  # Only hard-rejects are FACE_TOO_SMALL, LANDMARK_FAILURE, CROP_EMPTY
+  # All other quality issues are advisory — they lower the score
+  # but a face can still pass if overall score is above this threshold
+  min_overall_score: 0.30
 
 # ─── Recognition / Matching ───
 recognition:

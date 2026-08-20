@@ -41,7 +41,7 @@ def render_reports_page(rt):
                         "Note": a["note"],
                     })
                 df = pd.DataFrame(rows)
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.dataframe(df, width="stretch", hide_index=True)
                 st.download_button("📥 CSV", df.to_csv(index=False),
                                   file_name=f"attendance_{sid}.csv",
                                   key=f"dl_{sid}")

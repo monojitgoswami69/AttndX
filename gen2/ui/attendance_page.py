@@ -32,15 +32,31 @@ def render_attendance_page(rt):
 
     if not engine.session_active:
         # Pre-session controls
-        classes = Config.get("attendance")  # not used, just show mode
         demo = Config.get("attendance", "demo_mode")
         times = Config.get("attendance", "check_times_demo" if demo else "check_times_normal")
         unit = "sec" if demo else "min"
         st.info(f"{'⚡ DEMO' if demo else '🕐 NORMAL'} mode — "
                 f"checks at {times} {unit}")
 
-        if st.button("▶️ Start Session", type="primary", use_container_width=True):
-            sid = engine.start_session("Session")
+        # Dynamic subject selection from DB
+        subjects = rt.attendance_db.get_all_subjects()
+        if not subjects:
+            st.warning("No subjects configured. Add subjects in the **Subjects** tab first.")
+            return
+
+        subject_options = {s["subject_id"]: f"{s['name']}"
+                          + (f" ({s['code']})" if s.get("code") else "")
+                          for s in subjects}
+        selected_sid = st.selectbox(
+            "📚 Select Subject",
+            options=list(subject_options.keys()),
+            format_func=lambda x: subject_options[x],
+            key="att_subject_select",
+        )
+        selected_name = subjects[list(subject_options).index(selected_sid)]["name"]
+
+        if st.button("▶️ Start Session", type="primary", width="stretch"):
+            sid = engine.start_session(selected_name)
             if sid:
                 st.rerun()
             else:
@@ -100,6 +116,6 @@ def render_attendance_page(rt):
                     "Note": a["note"],
                 })
             df = pd.DataFrame(rows)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
             st.download_button("📥 CSV", df.to_csv(index=False),
                               file_name=f"attendance_{engine.session_id}.csv")
