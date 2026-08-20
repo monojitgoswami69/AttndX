@@ -115,11 +115,38 @@ class AttendanceDB:
         conn.row_factory = sqlite3.Row
         return conn
 
+    # Default subjects copied from the old system's config.py AVAILABLE_CLASSES
+    DEFAULT_SUBJECTS = [
+        ("Computer Science 101", "CS101"),
+        ("Computer Science 201", "CS201"),
+        ("Computer Science 301", "CS301"),
+        ("Mathematics 101", "MA101"),
+        ("Mathematics 201", "MA201"),
+        ("Physics 101", "PH101"),
+        ("Physics 201", "PH201"),
+        ("Chemistry 101", "CH101"),
+        ("Biology 101", "BI101"),
+        ("English 101", "EN101"),
+        ("History 101", "HI101"),
+        ("Engineering 101", "EN101"),
+    ]
+
     def _init_db(self):
         conn = self._connect()
         conn.executescript(self.SCHEMA)
         conn.commit()
         conn.close()
+        self._seed_default_subjects()
+
+    def _seed_default_subjects(self):
+        """Seed default subjects if the table is empty (first run or upgrade)."""
+        existing = self.get_all_subjects()
+        if existing:
+            return
+        logger.info("Seeding default subjects...")
+        for name, code in self.DEFAULT_SUBJECTS:
+            self.add_subject(name, code)
+        logger.info(f"Seeded {len(self.DEFAULT_SUBJECTS)} default subjects.")
 
     # ─── Sessions ───
 

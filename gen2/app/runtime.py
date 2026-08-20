@@ -30,16 +30,17 @@ logger = logging.getLogger(__name__)
 
 
 class AppRuntime:
-    """Singleton runtime that owns all shared resources.
+    """Application runtime that owns all shared resources.
 
-    All components are loaded once and reused. Thread-safe after __init__.
+    All components are loaded once and reused. In Streamlit, this is cached
+    in st.session_state. The class-level _instance is a convenience for
+    non-Streamlit use (scripts, tests) and does NOT enforce a singleton —
+    Streamlit's session_state handles that.
     """
 
     _instance: "AppRuntime | None" = None
 
     def __init__(self):
-        if AppRuntime._instance is not None:
-            raise RuntimeError("AppRuntime already initialized. Use AppRuntime.get().")
         AppRuntime._instance = self
 
         Config.load()
