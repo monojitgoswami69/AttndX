@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Rebuild the recognition index from the authoritative biometric DB."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+from gen2.config import Config
+from gen2.storage.db import BiometricDB
+from gen2.recognition.matching.engine import IdentityIndex
+
+def main():
+    Config.load()
+    db = BiometricDB.safe_open()
+    templates = db.get_all_templates()
+    identities = db.get_all_identities()
+    names = {i["identity_id"]: i["name"] for i in identities}
+
+    index = IdentityIndex()
+    index.rebuild(templates, names)
+
+    print(f"Index rebuilt: {index.size} identities")
+    print(f"  Templates loaded: {len(templates)}")
+    print(f"  DB identities: {len(identities)}")
+
+if __name__ == "__main__":
+    main()
