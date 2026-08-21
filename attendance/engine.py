@@ -103,27 +103,16 @@ class AttendanceEngine:
             logger.warning("No enrolled identities — cannot start session")
             return None
 
-        # Camera strategy:
-        #   WebRTC mode (_use_external=True):  browser owns the camera.
-        #     Do NOT open cv2.VideoCapture — it would grab the device
-        #     on the server side, preventing the browser from accessing it
-        #     on some OSes, and it stays open as a privacy leak.
-        #   cv2 mode (_use_external=False): open the cv2 camera as the
-        #     primary source. Release it when the session ends.
-        if not self._use_external:
-            if not self.camera.is_opened():
-                try:
-                    self.camera.open()
-                    if self.camera.is_opened():
-                        logger.info("cv2 camera opened as primary source")
-                except Exception as e:
-                    logger.error(f"cv2 camera open failed: {e}")
+        # Native OpenCV camera lifecycle
+        if not self.camera.is_opened():
+            try:
+                if not self.camera.open():
+                    logger.error("Native OpenCV camera open failed")
                     return None
-        else:
-            # Ensure cv2 camera is NOT held open from a previous session
-            if self.camera.is_opened():
-                self.camera.release()
-                logger.info("Released stale cv2 camera before WebRTC session")
+                logger.info("Native OpenCV camera opened successfully")
+            except Exception as e:
+                logger.error(f"Camera open exception: {e}")
+                return None
 
         mode = "demo" if self.demo_mode else "normal"
         self.session_id = self.attendance_db.create_session(class_name, mode)
@@ -289,15 +278,11 @@ class AttendanceEngine:
         self._set_status(f"Check {check_number}/{self.total_checks} completed")
 
     def _read_frame(self) -> np.ndarray | None:
-        """Read a frame from external buffer (WebRTC) or cv2 camera (fallback).
-        Tries external buffer first; if empty, falls back to cv2 camera."""
-        if self._use_external and self.external_buffer is not None:
-            frame = self.external_buffer.peek()
-            if frame is not None:
-                return frame
-            # External buffer empty — try cv2 fallback
+        """Read a frame directly from native camera source."""
         if self.camera.is_opened():
             return self.camera.read_frame()
+        if self.external_buffer is not None:
+            return self.external_buffer.peek()
         return None
 
     def _compute_final(self, session_id: str):
