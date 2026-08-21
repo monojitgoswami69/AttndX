@@ -48,6 +48,16 @@ class AppRuntime:
 
         logger.info("Initializing gen2 runtime...")
 
+        # ── Auto-ensure models are present ──
+        try:
+            from scripts.download_models import check_models_present, download_all_models
+            models_ok, missing = check_models_present()
+            if not models_ok:
+                logger.info(f"Missing models detected: {missing}. Automatically downloading...")
+                download_all_models(include_optional=False)
+        except Exception as e:
+            logger.warning(f"Auto-download check encountered an error: {e}")
+
         # ── Load models (eagerly, once) ──
         self.detector = self._create_detector()
         self.aligner = ArcFaceAligner()

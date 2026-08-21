@@ -50,7 +50,10 @@ class ArcFaceEmbedder:
     def __init__(self):
         model_path = Config.model_path("embedder")
         if not model_path.exists():
-            raise FileNotFoundError(f"ArcFace model not found: {model_path}")
+            raise FileNotFoundError(
+                f"ArcFace model not found: {model_path}\n"
+                f"Please run `python scripts/download_models.py` to download all required AI models."
+            )
 
         providers = Config.get("onnx", "providers")
         # Filter to only available providers

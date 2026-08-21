@@ -40,7 +40,10 @@ class YuNetDetector:
     def __init__(self):
         model_path = Config.model_path("detector")
         if not model_path.exists():
-            raise FileNotFoundError(f"YuNet model not found: {model_path}")
+            raise FileNotFoundError(
+                f"YuNet model not found: {model_path}\n"
+                f"Please run `python scripts/download_models.py` to download all required AI models."
+            )
 
         self.score_threshold = Config.get("detector", "score_threshold")
         self.nms_threshold = Config.get("detector", "nms_threshold")

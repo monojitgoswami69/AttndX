@@ -21,6 +21,9 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Download AI model weights (SCRFD, GlintR100, MiniFASNet, YuNet)
+python scripts/download_models.py
 ```
 
 ## Running the Application

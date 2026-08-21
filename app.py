@@ -46,7 +46,10 @@ st.markdown("""
 def get_runtime():
     """Lazy-initialize the AppRuntime singleton, stored in session_state."""
     if "runtime" not in st.session_state:
-        with st.spinner("Loading AI models..."):
+        from scripts.download_models import check_models_present
+        models_ok, _ = check_models_present()
+        spinner_msg = "Downloading missing AI models (first-time setup)..." if not models_ok else "Loading AI models..."
+        with st.spinner(spinner_msg):
             from runtime import AppRuntime
             st.session_state.runtime = AppRuntime()
     return st.session_state.runtime
