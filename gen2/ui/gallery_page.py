@@ -26,6 +26,22 @@ def render_gallery_page(rt):
             ident = identities[i + j]
             with cols[j]:
                 with st.container(border=True):
+                    # Display thumbnail from captures if available
+                    from gen2.config import Config
+                    cap_dir = Config.captures_dir() / ident["identity_id"]
+                    thumb_path = cap_dir / "aligned_01.png"
+                    if not thumb_path.exists():
+                        thumb_path = cap_dir / "raw_01.jpg"
+
+                    if thumb_path.exists():
+                        try:
+                            img = cv2.imread(str(thumb_path))
+                            if img is not None:
+                                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                                st.image(rgb, width=120)
+                        except Exception:
+                            pass
+
                     st.markdown(f"### {ident['name']}")
                     st.caption(f"ID: {ident['identity_id']}")
                     st.caption(f"Pipeline: {ident['pipeline_version'][:30]}...")

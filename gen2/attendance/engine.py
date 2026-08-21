@@ -266,6 +266,16 @@ class AttendanceEngine:
 
         self.current_check_running = False
 
+        # Save check snapshot to snapshots_dir if available
+        if frame is not None:
+            try:
+                snap_dir = Config.snapshots_dir() / session_id
+                snap_dir.mkdir(parents=True, exist_ok=True)
+                snap_path = snap_dir / f"check_{check_number:02d}.jpg"
+                cv2.imwrite(str(snap_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            except Exception as e:
+                logger.warning(f"Failed to save snapshot for check {check_number}: {e}")
+
         # Record check (idempotent: overwrites if check_number exists)
         self.attendance_db.record_check(
             session_id, check_number,
