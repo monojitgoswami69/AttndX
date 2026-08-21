@@ -171,11 +171,11 @@ class AttendanceVideoProcessor(VideoProcessorBase if _HAS_WEBRTC else object):
         if self.engine.external_buffer is not None:
             self.engine.external_buffer.push(img)
 
-        # Run the full pipeline (with liveness for preview overlay)
+        # Run the recognition pipeline for live preview
         annotated = img.copy()
         try:
             frame_result = self.engine.pipeline.process_frame(
-                img, run_liveness=True
+                img, run_liveness=False
             )
             with self.engine._lock:
                 self.engine._latest_frame_result = frame_result
@@ -183,7 +183,10 @@ class AttendanceVideoProcessor(VideoProcessorBase if _HAS_WEBRTC else object):
         except Exception:
             pass
 
-        return av.VideoFrame.from_ndarray(annotated, format="bgr24")
+        new_frame = av.VideoFrame.from_ndarray(annotated, format="bgr24")
+        new_frame.pts = frame.pts
+        new_frame.time_base = frame.time_base
+        return new_frame
 
 
 def render_attendance_page(rt):

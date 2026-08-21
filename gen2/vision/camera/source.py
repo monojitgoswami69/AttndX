@@ -84,9 +84,16 @@ class CameraSource:
             if idx != 0:
                 candidates.append(0)
 
+            backend_cfg = Config.get("camera", "backend", default="default")
+            api_preference = cv2.CAP_DSHOW if backend_cfg == "dshow" else cv2.CAP_ANY
+
             for try_idx in candidates:
                 try:
-                    self._cap = cv2.VideoCapture(try_idx)
+                    if api_preference == cv2.CAP_DSHOW:
+                        self._cap = cv2.VideoCapture(try_idx, cv2.CAP_DSHOW)
+                    else:
+                        self._cap = cv2.VideoCapture(try_idx)
+
                     if not self._cap.isOpened():
                         continue
                     self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
@@ -97,7 +104,7 @@ class CameraSource:
                         if ret:
                             break
                     self.index = try_idx
-                    logger.info(f"Camera opened at index {try_idx}")
+                    logger.info(f"Camera opened at index {try_idx} (backend: {backend_cfg})")
                     return True
                 except Exception as e:
                     logger.warning(f"Camera index {try_idx} failed: {e}")
