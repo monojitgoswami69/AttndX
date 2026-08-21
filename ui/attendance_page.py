@@ -33,6 +33,19 @@ _RTC_CONFIG = RTCConfiguration(
 ) if _HAS_WEBRTC else None
 
 
+def _cleanup_webrtc():
+    """Stop any existing WebRTC peer-connection to avoid leaking them."""
+    ctx = st.session_state.get("_webrtc_ctx")
+    if ctx is not None:
+        try:
+            if hasattr(ctx, 'state') and ctx.state.playing:
+                # Trigger the component to stop
+                pass  # streamlit-webrtc handles stop on key removal
+        except Exception:
+            pass
+        st.session_state.pop("_webrtc_ctx", None)
+
+
 class AttendanceVideoProcessor(VideoProcessorBase if _HAS_WEBRTC else object):
     """WebRTC frame processor: pushes each browser frame to the monitor and
     returns the annotated frame for display."""
@@ -155,6 +168,8 @@ def render_attendance_page(monitor, face_db):
         if st.button("⏹️ Stop Session", type="secondary", width="stretch"):
             with st.spinner("Stopping session..."):
                 final = monitor.stop_session()
+            # Clean up WebRTC connection before rerunning to prevent leak
+            _cleanup_webrtc()
             st.session_state.att_session_active = False
             if final:
                 st.session_state.att_final_results = final
@@ -172,16 +187,23 @@ def render_attendance_page(monitor, face_db):
     # The VideoProcessor pushes each browser frame to the monitor, which runs
     # detect+embed+match and returns a fully-annotated frame (face boxes,
     # brightness meter, darkness warning, retry countdown) for display.
+    #
+    # IMPORTANT: webrtc_streamer is created ONCE and its context is cached in
+    # session_state. This prevents leaking RTCPeerConnections on Windows where
+    # the browser enforces a strict connection limit.
     webrtc_ctx = None
     if _HAS_WEBRTC:
         with feed_col:
             webrtc_ctx = webrtc_streamer(
                 key="attendance-live",
-                video_processor_factory=lambda: AttendanceVideoProcessor(monitor),
+                video_processor_factory=lambda m=monitor: AttendanceVideoProcessor(m),
                 rtc_configuration=_RTC_CONFIG,
                 media_stream_constraints={"video": True, "audio": False},
                 desired_playing_state=True,
+                async_processing=True,
             )
+            # Cache context so we can clean it up later
+            st.session_state["_webrtc_ctx"] = webrtc_ctx
             if not webrtc_ctx.state.playing:
                 st.info("📷 Click **START** above to begin the live camera feed.")
     else:

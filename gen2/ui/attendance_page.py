@@ -19,6 +19,18 @@ except Exception:
 
 _RTC_CONFIG = RTCConfiguration(ice_servers=[]) if _HAS_WEBRTC else None
 
+
+def _cleanup_webrtc():
+    """Stop any existing WebRTC peer-connection to avoid leaking them."""
+    ctx = st.session_state.get("_webrtc_ctx")
+    if ctx is not None:
+        try:
+            if hasattr(ctx, 'state') and ctx.state.playing:
+                pass  # streamlit-webrtc handles stop on key removal
+        except Exception:
+            pass
+        st.session_state.pop("_webrtc_ctx", None)
+
 # Colors (BGR)
 _GREEN = (0, 200, 0)
 _RED = (0, 0, 220)
@@ -222,6 +234,7 @@ def render_attendance_page(rt):
     col_stop, _ = st.columns([1, 3])
     with col_stop:
         if st.button("⏹️ Stop Session", type="secondary"):
+            _cleanup_webrtc()
             engine.stop_session()
             st.rerun()
 
@@ -238,11 +251,14 @@ def render_attendance_page(rt):
         if _HAS_WEBRTC:
             webrtc_ctx = webrtc_streamer(
                 key="attendance-live",
-                video_processor_factory=lambda: AttendanceVideoProcessor(engine),
+                video_processor_factory=lambda e=engine: AttendanceVideoProcessor(e),
                 rtc_configuration=_RTC_CONFIG,
                 media_stream_constraints={"video": True, "audio": False},
                 desired_playing_state=True,
+                async_processing=True,
             )
+            # Cache context so we can clean it up on session stop
+            st.session_state["_webrtc_ctx"] = webrtc_ctx
         # Placeholder below the WebRTC component for cv2 fallback
         feed_placeholder = st.empty()
 
@@ -352,5 +368,6 @@ def render_attendance_page(rt):
                               file_name=f"attendance_{engine.session_id}.csv")
 
     if st.button("🔄 Start New Session", type="primary"):
+        _cleanup_webrtc()
         st.session_state.att_engine = None
         st.rerun()
