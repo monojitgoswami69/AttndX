@@ -103,11 +103,16 @@ class AttendanceEngine:
             logger.warning("No enrolled identities — cannot start session")
             return None
 
-        # Open camera if not using external buffer
-        if not self._use_external and not self.camera.is_opened():
-            if not self.camera.open():
-                logger.error("Failed to open camera")
-                return None
+        # Open cv2 camera as a fallback (even in WebRTC mode — if WebRTC
+        # fails to connect on some platforms e.g. Windows link-local issues,
+        # the check thread can still read frames from cv2)
+        if not self.camera.is_opened():
+            try:
+                self.camera.open()
+                if self.camera.is_opened():
+                    logger.info("cv2 camera opened as fallback source")
+            except Exception as e:
+                logger.warning(f"cv2 camera open failed (will rely on external): {e}")
 
         mode = "demo" if self.demo_mode else "normal"
         self.session_id = self.attendance_db.create_session(class_name, mode)
@@ -257,10 +262,16 @@ class AttendanceEngine:
         self._set_status(f"Check {check_number}/{self.total_checks} completed")
 
     def _read_frame(self) -> np.ndarray | None:
-        """Read a frame from camera or external buffer."""
+        """Read a frame from external buffer (WebRTC) or cv2 camera (fallback).
+        Tries external buffer first; if empty, falls back to cv2 camera."""
         if self._use_external and self.external_buffer is not None:
-            return self.external_buffer.peek()
-        return self.camera.read_frame()
+            frame = self.external_buffer.peek()
+            if frame is not None:
+                return frame
+            # External buffer empty — try cv2 fallback
+        if self.camera.is_opened():
+            return self.camera.read_frame()
+        return None
 
     def _compute_final(self, session_id: str):
         """Compute final attendance from recorded checks."""

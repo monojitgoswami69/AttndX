@@ -17,9 +17,7 @@ try:
 except Exception:
     _HAS_WEBRTC = False
 
-_RTC_CONFIG = RTCConfiguration(
-    ice_servers=[{"urls": ["stun:stun.l.google.com:19302"]}]
-) if _HAS_WEBRTC else None
+_RTC_CONFIG = RTCConfiguration(ice_servers=[]) if _HAS_WEBRTC else None
 
 # Colors (BGR)
 _GREEN = (0, 200, 0)
@@ -221,35 +219,41 @@ def render_attendance_page(rt):
     # ─── Active session ───
     st.markdown("### 🔴 Session In Progress")
 
-    col_stop, col_info = st.columns([1, 3])
+    col_stop, _ = st.columns([1, 3])
     with col_stop:
         if st.button("⏹️ Stop Session", type="secondary"):
             engine.stop_session()
             st.rerun()
 
-    # Create placeholders that we'll update in a loop
+    # Status bar placeholder (updated in-place, no st.rerun)
     status_placeholder = st.empty()
+
+    # Two-column layout: camera feed (left, 2/3) + info (right, 1/3)
     feed_col, info_col = st.columns([2, 1])
-    feed_placeholder = feed_col.empty()
+
+    # Camera feed goes directly in the left column — NOT in a placeholder.
+    # This keeps the WebRTC component stable across updates.
+    with feed_col:
+        webrtc_ctx = None
+        if _HAS_WEBRTC:
+            webrtc_ctx = webrtc_streamer(
+                key="attendance-live",
+                video_processor_factory=lambda: AttendanceVideoProcessor(engine),
+                rtc_configuration=_RTC_CONFIG,
+                media_stream_constraints={"video": True, "audio": False},
+                desired_playing_state=True,
+            )
+        # Placeholder below the WebRTC component for cv2 fallback
+        feed_placeholder = st.empty()
+
+    # Info panel placeholder (right column, updated in-place)
     info_placeholder = info_col.empty()
 
-    # WebRTC video feed
-    webrtc_ctx = None
-    if _HAS_WEBRTC:
-        webrtc_ctx = webrtc_streamer(
-            key="attendance-live",
-            video_processor_factory=lambda: AttendanceVideoProcessor(engine),
-            rtc_configuration=_RTC_CONFIG,
-            media_stream_constraints={"video": True, "audio": False},
-            desired_playing_state=True,
-        )
-
-    # ─── Live update loop ───
-    # Use st.rerun() to refresh the page periodically so metrics update.
-    # WebRTC handles its own real-time frame delivery.
+    # ─── Live update loop (no st.rerun — uses in-place placeholder updates) ───
     while engine.session_active:
         status = engine.get_status()
 
+        # Update status bar in-place
         with status_placeholder.container():
             sc1, sc2, sc3, sc4 = st.columns(4)
             sc1.metric("⏱️ Elapsed",
@@ -263,13 +267,14 @@ def render_attendance_page(rt):
             else:
                 sc4.metric("📡 Status", "🔴 LIVE")
 
-        # Live recognition results
+        # Update info panel in-place
         latest = engine.get_latest_frame_result()
         with info_placeholder.container():
             if latest:
                 st.markdown("#### 📡 Live Recognition")
-                st.metric("Detected", latest.num_detected)
-                st.metric("Recognized", latest.num_recognized)
+                mc1, mc2 = st.columns(2)
+                mc1.metric("Detected", latest.num_detected)
+                mc2.metric("Recognized", latest.num_recognized)
 
                 if latest.faces:
                     for face in latest.faces:
@@ -282,9 +287,8 @@ def render_attendance_page(rt):
                             elif face.recognition.state == RecognitionState.AMBIGUOUS:
                                 st.warning("⚠️ Ambiguous")
                             elif face.recognition.state == RecognitionState.REJECTED:
-                                st.error(f"🔴 Rejected")
+                                st.error("🔴 Rejected")
 
-                # Check schedule
                 st.markdown("---")
                 st.markdown("#### 📋 Schedule")
                 check_times = engine.check_times
@@ -304,9 +308,28 @@ def render_attendance_page(rt):
             if status.spoofing_count > 0:
                 st.warning(f"🚫 {status.spoofing_count} spoofing attempt(s) blocked")
 
-        # Poll every 1s and rerun to refresh
+        # cv2 fallback: if WebRTC isn't playing, read from cv2 camera
+        webrtc_playing = (webrtc_ctx and webrtc_ctx.state.playing) if webrtc_ctx else False
+        if not webrtc_playing:
+            if not rt.camera.is_opened():
+                rt.camera.open()
+            if rt.camera.is_opened():
+                frame = rt.camera.read_frame()
+                if frame is not None:
+                    rt.external_buffer.push(frame)
+                    try:
+                        frame_result = rt.pipeline.process_frame(
+                            frame, run_liveness=True)
+                        with engine._lock:
+                            engine._latest_frame_result = frame_result
+                        annotated = _draw_frame_overlays(frame.copy(), frame_result)
+                        rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+                        feed_placeholder.image(rgb, channels="RGB")
+                    except Exception:
+                        pass
+
+        # Throttle refresh
         time.sleep(1)
-        st.rerun()
 
     # ─── Session ended: show final results ───
     st.markdown("---")
