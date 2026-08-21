@@ -1,22 +1,14 @@
-"""
-Attendance Session Page.
-Runs a live-monitored attendance session with scheduled face checks,
-real-time camera feed, brightness monitoring, darkness warnings,
-and final attendance results with anomaly notes.
-
-The live camera feed is rendered via streamlit-webrtc (WebRTC) for real-time
-video. Frames flow browser → WebRTC VideoProcessor → AttendanceMonitor
-process_external_frame() → annotated frame → browser. The monitor's
-background thread still runs the scheduled checks, sampling frames from
-the buffer the VideoProcessor populates.
-"""
-
+"""Attendance page for gen2 — live session with WebRTC."""
 import streamlit as st
 import cv2
-import time
 import numpy as np
+import time
 import pandas as pd
-from PIL import Image
+
+from config import Config
+from attendance.engine import AttendanceEngine
+from recognition.matching.engine import RecognitionState
+from recognition.liveness.minifasnet import LivenessState
 
 try:
     from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
@@ -25,11 +17,15 @@ try:
 except Exception:
     _HAS_WEBRTC = False
 
-from core.config import Config
-
-
+# ICE servers for WebRTC connection establishment.
+# STUN servers are required for ICE candidate gathering — without them,
+# the connection silently fails on Windows and many browsers.
 _RTC_CONFIG = RTCConfiguration(
-    ice_servers=[{"urls": ["stun:stun.l.google.com:19302"]}]
+    ice_servers=[
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun2.l.google.com:19302"]},
+    ]
 ) if _HAS_WEBRTC else None
 
 
@@ -39,678 +35,423 @@ def _cleanup_webrtc():
     if ctx is not None:
         try:
             if hasattr(ctx, 'state') and ctx.state.playing:
-                # Trigger the component to stop
                 pass  # streamlit-webrtc handles stop on key removal
         except Exception:
             pass
         st.session_state.pop("_webrtc_ctx", None)
+    # Reset connection tracking
+    st.session_state.pop("_webrtc_connect_time", None)
+
+# Colors (BGR)
+_GREEN = (0, 200, 0)
+_RED = (0, 0, 220)
+_ORANGE = (0, 165, 255)
+_YELLOW = (0, 255, 255)
+_GRAY = (128, 128, 128)
+_WHITE = (255, 255, 255)
+_BLUE = (255, 100, 0)
+
+
+def _draw_frame_overlays(frame, frame_result):
+    """Draw bounding boxes, names, confidence, liveness, and spoofing
+    overlays on a copy of the frame."""
+    if frame_result is None or not frame_result.faces:
+        return frame
+
+    for face in frame_result.faces:
+        bbox = face.bbox
+        if bbox is None or bbox == (0, 0, 0, 0):
+            continue
+        x1, y1, x2, y2 = bbox
+
+        rec = face.recognition
+        liveness = face.liveness
+
+        # Determine box color and label
+        if liveness and liveness.state == LivenessState.SPOOF:
+            # Yellow dashed box for spoof
+            _draw_dashed_rect(frame, (x1, y1, x2, y2), _YELLOW, 2)
+            label = f"SPOOF — {liveness.spoofing_type or 'detected'}"
+            _draw_label(frame, (x1, y1), label, _YELLOW, text_color=(0, 0, 0))
+            continue
+
+        if rec is None:
+            continue
+
+        if rec.state == RecognitionState.KNOWN:
+            color = _GREEN
+            name = rec.name or "Unknown"
+            label = f"{name} ({rec.confidence:.0%})"
+            if liveness and liveness.state == LivenessState.LIVE:
+                label = f"{name} ({rec.confidence:.0%}) LIVE"
+        elif rec.state == RecognitionState.UNKNOWN:
+            color = _RED
+            label = "Unknown"
+        elif rec.state == RecognitionState.AMBIGUOUS:
+            color = _ORANGE
+            label = "Ambiguous?"
+        elif rec.state == RecognitionState.REJECTED:
+            color = _GRAY
+            label = "Rejected"
+        else:
+            color = _GRAY
+            label = "?"
+
+        # Draw box
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+
+        # Draw label
+        _draw_label(frame, (x1, y1), label, color)
+
+        # Draw track ID (small, top-right corner)
+        if face.track_id is not None:
+            tid_text = f"T{face.track_id}"
+            cv2.putText(frame, tid_text, (x2 - 40, y1 - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+
+        # Confirmed badge
+        if face.confirmed:
+            cv2.circle(frame, (x2 - 12, y2 - 12), 8, _GREEN, -1, cv2.LINE_AA)
+            cv2.putText(frame, "C", (x2 - 16, y2 - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, _WHITE, 1, cv2.LINE_AA)
+
+    return frame
+
+
+def _draw_label(frame, bbox_tl, label, color, text_color=None):
+    """Draw a semi-transparent label background + text above the box."""
+    if text_color is None:
+        text_color = _WHITE
+    x1, y1 = bbox_tl
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.5
+    thickness = 1
+    (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
+
+    label_y = max(y1 - 8, th + 8)
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x1, label_y - th - 6),
+                  (x1 + tw + 10, label_y + 4), color, -1)
+    cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
+    cv2.putText(frame, label, (x1 + 5, label_y - 2),
+                font, font_scale, text_color, thickness, cv2.LINE_AA)
+
+
+def _draw_dashed_rect(frame, bbox, color, thickness=2, dash=10, gap=6):
+    """Draw a dashed rectangle."""
+    x1, y1, x2, y2 = bbox
+    for x in range(x1, x2, dash + gap):
+        cv2.line(frame, (x, y1), (min(x + dash, x2), y1),
+                 color, thickness, cv2.LINE_AA)
+    for x in range(x1, x2, dash + gap):
+        cv2.line(frame, (x, y2), (min(x + dash, x2), y2),
+                 color, thickness, cv2.LINE_AA)
+    for y in range(y1, y2, dash + gap):
+        cv2.line(frame, (x1, y), (x1, min(y + dash, y2)),
+                 color, thickness, cv2.LINE_AA)
+    for y in range(y1, y2, dash + gap):
+        cv2.line(frame, (x2, y), (x2, min(y + dash, y2)),
+                 color, thickness, cv2.LINE_AA)
 
 
 class AttendanceVideoProcessor(VideoProcessorBase if _HAS_WEBRTC else object):
-    """WebRTC frame processor: pushes each browser frame to the monitor and
-    returns the annotated frame for display."""
+    """Pushes browser frames to the engine's external buffer and returns
+    annotated frames with bounding boxes, names, and spoofing warnings."""
 
-    def __init__(self, monitor):
+    def __init__(self, engine):
         if _HAS_WEBRTC:
             super().__init__()
-        self.monitor = monitor
+        self.engine = engine
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        annotated = self.monitor.process_external_frame(img)
-        if annotated is None:
-            annotated = img
+
+        # Push raw frame to the engine's buffer for the check thread
+        if self.engine.external_buffer is not None:
+            self.engine.external_buffer.push(img)
+
+        # Run the recognition pipeline for live preview
+        annotated = img.copy()
+        try:
+            frame_result = self.engine.pipeline.process_frame(
+                img, run_liveness=False
+            )
+            with self.engine._lock:
+                self.engine._latest_frame_result = frame_result
+            annotated = _draw_frame_overlays(annotated, frame_result)
+        except Exception:
+            pass
+
         new_frame = av.VideoFrame.from_ndarray(annotated, format="bgr24")
         new_frame.pts = frame.pts
         new_frame.time_base = frame.time_base
         return new_frame
 
 
-def render_attendance_page(monitor, face_db):
-    """Render the attendance session page."""
-
+def render_attendance_page(rt):
     st.markdown("## 📋 Attendance Session")
 
-    student_count = face_db.get_student_count()
-    if student_count == 0:
-        st.warning(
-            "⚠️ **No students registered!** "
-            "Please register students first in the **Register** tab."
-        )
+    if rt.identity_index.size == 0:
+        st.warning("No identities enrolled. Register students first.")
         return
 
-    st.success(f"✅ **{student_count}** students registered and ready.")
+    st.success(f"✅ {rt.identity_index.size} identities enrolled.")
 
-    # Show registered students summary
-    with st.expander("👥 Registered Students", expanded=False):
-        students = face_db.get_all_students()
-        cols = st.columns(min(len(students), 4))
-        for i, (sid, data) in enumerate(students.items()):
-            with cols[i % 4]:
-                images = face_db.get_student_face_images(sid)
-                if images:
-                    rgb = cv2.cvtColor(images[0], cv2.COLOR_BGR2RGB)
-                    st.image(rgb, caption=data["name"], width="stretch")
-                else:
-                    st.markdown(f"**{data['name']}**")
-                st.caption(f"ID: {sid}")
-
-    st.markdown("---")
-
-    # Mode indicator
-    if Config.DEMO_MODE:
-        check_times = Config.CHECK_TIMES_DEMO
-        st.info(
-            f"⚡ **DEMO MODE** — Session compresses to ~90 seconds\n\n"
-            f"Checks at: **{check_times[0]}s**, **{check_times[1]}s**, **{check_times[2]}s**\n\n"
-            f"💡 *Cover the camera with your hand to simulate darkness!*"
+    # Build attendance engine if not exists or reset
+    if st.session_state.get("att_engine") is None:
+        st.session_state.att_engine = AttendanceEngine(
+            pipeline=rt.pipeline,
+            camera=rt.camera,
+            external_buffer=rt.external_buffer,
+            biometric_db=rt.biometric_db,
+            attendance_db=rt.attendance_db,
         )
-    else:
-        check_times = Config.CHECK_TIMES_NORMAL
-        st.info(
-            f"🕐 **NORMAL MODE** — Full session\n\n"
-            f"Checks at: {check_times[0]}min, {check_times[1]}min, {check_times[2]}min"
+    engine = st.session_state.att_engine
+
+    # ─── Pre-session / Post-session: not actively running ───
+    if not engine.session_active:
+        # Show final results if a session just completed
+        if engine.session_id is not None:
+            st.markdown("---")
+            st.markdown("## 📊 Final Results")
+            attendance = rt.attendance_db.get_attendance(engine.session_id)
+            if attendance:
+                rows = []
+                for a in attendance:
+                    rows.append({
+                        "Student": a["name"],
+                        "Status": a["status"].upper(),
+                        "Present": f"{a['checks_present']}",
+                        "Spoofed": a["checks_spoofed"],
+                        "Note": a["note"],
+                    })
+                df = pd.DataFrame(rows)
+
+                # Summary metrics
+                present = sum(1 for a in attendance if a["status"] == "present")
+                absent = sum(1 for a in attendance if a["status"] == "absent")
+                mc1, mc2, mc3 = st.columns(3)
+                mc1.metric("👥 Total", len(attendance))
+                mc2.metric("✅ Present", present)
+                mc3.metric("❌ Absent", absent)
+
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.download_button("📥 Download CSV", df.to_csv(index=False),
+                                  file_name=f"attendance_{engine.session_id}.csv")
+            else:
+                st.info("No attendance data recorded for this session.")
+
+            st.markdown("---")
+            if st.button("🔄 Start New Session", type="primary", use_container_width=True):
+                _cleanup_webrtc()
+                if st.session_state.get("att_engine") is not None:
+                    st.session_state.att_engine._release_camera()
+                st.session_state.pop("att_engine", None)
+                st.rerun()
+            return
+
+        # No completed session — show start controls
+        demo = Config.get("attendance", "demo_mode")
+        times = Config.get("attendance", "check_times_demo" if demo else "check_times_normal")
+        unit = "sec" if demo else "min"
+        st.info(f"{'⚡ DEMO' if demo else '🕐 NORMAL'} mode — "
+                f"checks at {times} {unit}")
+
+        # Dynamic subject selection from DB
+        subjects = rt.attendance_db.get_all_subjects()
+        if not subjects:
+            st.warning("No subjects configured. Add subjects in the **Subjects** tab first.")
+            return
+
+        subject_options = {s["subject_id"]: f"{s['name']}"
+                          + (f" ({s['code']})" if s.get("code") else "")
+                          for s in subjects}
+        selected_sid = st.selectbox(
+            "📚 Select Subject",
+            options=list(subject_options.keys()),
+            format_func=lambda x: subject_options[x],
+            key="att_subject_select",
         )
+        selected_name = subjects[list(subject_options).index(selected_sid)]["name"]
 
-    # ── Session State Management ──
-    if "att_session_active" not in st.session_state:
-        st.session_state.att_session_active = False
-    if "att_session_id" not in st.session_state:
-        st.session_state.att_session_id = None
-    if "att_final_shown" not in st.session_state:
-        st.session_state.att_final_shown = False
-
-    # ── Pre-Session: Start Controls ──
-    if not st.session_state.att_session_active:
-        st.session_state.att_final_shown = False
-        class_name = st.selectbox(
-            "📚 Class Name",
-            options=Config.AVAILABLE_CLASSES,
-            index=0,
-            key="att_class_name",
-        )
-
-        if st.button(
-            "▶️ START ATTENDANCE SESSION",
-            type="primary",
-            use_container_width=True,
-            disabled=not class_name.strip(),
-        ):
-            with st.spinner("🔄 Initializing session..."):
-                # External-camera mode when WebRTC is available: the browser
-                # webcam feeds frames to the monitor via process_external_frame.
-                use_ext = _HAS_WEBRTC
-                session_id = monitor.start_session(
-                    class_name=class_name.strip(),
-                    camera_index=Config.CAMERA_INDEX,
-                    use_external_camera=use_ext,
-                )
-
-            if session_id:
-                st.session_state.att_session_active = True
-                st.session_state.att_session_id = session_id
-                st.session_state.att_final_shown = False
+        if st.button("▶️ Start Session", type="primary", use_container_width=True):
+            sid = engine.start_session(selected_name)
+            if sid:
                 st.rerun()
             else:
-                st.error(
-                    "❌ Could not start session. Check that:\n"
-                    "- Students are registered\n"
-                    "- Webcam is available and not in use"
-                )
+                st.error("Failed to start. Check camera and enrolled identities.")
         return
 
-    # ── Active Session UI ──
+    # ─── Active session ───
     st.markdown("### 🔴 Session In Progress")
 
-    # Stop button
-    col_stop, col_info = st.columns([1, 3])
+    col_stop, _ = st.columns([1, 3])
     with col_stop:
-        if st.button("⏹️ Stop Session", type="secondary", width="stretch"):
-            with st.spinner("Stopping session..."):
-                final = monitor.stop_session()
-            # Clean up WebRTC connection before rerunning to prevent leak
+        if st.button("⏹️ Stop Session", type="secondary"):
             _cleanup_webrtc()
-            st.session_state.att_session_active = False
-            if final:
-                st.session_state.att_final_results = final
-                st.session_state.att_final_shown = True
+            engine.stop_session()
             st.rerun()
 
-    # Create placeholder containers
-    darkness_banner = st.empty()
-    status_container = st.empty()
-    feed_col, info_col = st.columns([2, 1])
-    check_placeholder = info_col.empty()
-    results_placeholder = st.empty()
+    # Status bar placeholder (updated in-place, no st.rerun)
+    status_placeholder = st.empty()
 
-    # ── Live Camera Feed via WebRTC ──
-    # The VideoProcessor pushes each browser frame to the monitor, which runs
-    # detect+embed+match and returns a fully-annotated frame (face boxes,
-    # brightness meter, darkness warning, retry countdown) for display.
-    #
-    # IMPORTANT: webrtc_streamer is created ONCE and its context is cached in
-    # session_state. This prevents leaking RTCPeerConnections on Windows where
-    # the browser enforces a strict connection limit.
-    webrtc_ctx = None
-    if _HAS_WEBRTC:
-        with feed_col:
+    # Two-column layout: camera feed (left, 2/3) + info (right, 1/3)
+    feed_col, info_col = st.columns([2, 1])
+
+    # Camera feed goes directly in the left column — NOT in a placeholder.
+    # This keeps the WebRTC component stable across updates.
+    with feed_col:
+        webrtc_ctx = None
+        if _HAS_WEBRTC:
             webrtc_ctx = webrtc_streamer(
                 key="attendance-live",
-                video_processor_factory=lambda m=monitor: AttendanceVideoProcessor(m),
+                video_processor_factory=lambda e=engine: AttendanceVideoProcessor(e),
                 rtc_configuration=_RTC_CONFIG,
-                media_stream_constraints={"video": True, "audio": False},
+                media_stream_constraints={
+                    "video": {
+                        "width": {"ideal": 640},
+                        "height": {"ideal": 480},
+                        "facingMode": "user",
+                    },
+                    "audio": False,
+                },
                 desired_playing_state=True,
                 async_processing=True,
             )
-            # Cache context so we can clean it up later
+            # Cache context so we can clean it up on session stop
             st.session_state["_webrtc_ctx"] = webrtc_ctx
-            if not webrtc_ctx.state.playing:
-                st.info("📷 Click **START** above to begin the live camera feed.")
-    else:
-        with feed_col:
+
+            # ── Connection status feedback ──
+            if webrtc_ctx.state.playing:
+                # Connected successfully — clear any tracking
+                st.session_state.pop("_webrtc_connect_time", None)
+            else:
+                # Not playing — track how long we've been waiting
+                if "_webrtc_connect_time" not in st.session_state:
+                    st.session_state["_webrtc_connect_time"] = time.time()
+                wait_secs = time.time() - st.session_state["_webrtc_connect_time"]
+
+                if wait_secs < 8:
+                    st.info("📷 Connecting to camera... Please allow camera access if prompted.")
+                elif wait_secs < 20:
+                    st.warning(
+                        "⏳ **Camera connection is taking longer than expected.**\n\n"
+                        "**Try these steps:**\n"
+                        "1. Click **Allow** if the browser asked for camera permission\n"
+                        "2. Check that no other app is using the camera\n"
+                        "3. Try refreshing the page (F5)\n"
+                        "4. On Windows: try Chrome or Edge (Firefox may have issues)"
+                    )
+                else:
+                    st.error(
+                        "❌ **Camera connection failed.**\n\n"
+                        "The WebRTC video feed could not be established. This can happen when:\n"
+                        "- Camera permissions were denied in the browser\n"
+                        "- Another application is using the camera\n"
+                        "- Your browser or network blocks WebRTC connections\n"
+                        "- A firewall is blocking STUN/TURN traffic\n\n"
+                        "**Stop the session and try again after fixing the issue.**"
+                    )
+        else:
             st.warning(
-                "⚠️ streamlit-webrtc not installed. Falling back to cv2 camera.\n"
+                "⚠️ `streamlit-webrtc` not installed. Camera feed unavailable.\n\n"
                 "Install with: `pip install streamlit-webrtc`"
             )
-            # Fallback placeholder for the live frame (cv2 path)
-            frame_placeholder = st.empty()
+        # Placeholder below the WebRTC component for cv2 fallback
+        feed_placeholder = st.empty()
 
-    # ── Live Update Loop (panels only; video handled by WebRTC) ──
-    while st.session_state.att_session_active:
-        status = monitor.get_session_status()
-        brightness = monitor.get_brightness_status()
-        retry_info = monitor.get_retry_info()
+    # Info panel placeholder (right column, updated in-place)
+    info_placeholder = info_col.empty()
 
-        if not status["active"]:
-            st.session_state.att_session_active = False
-            session_data = monitor.attendance_store.get_session(
-                st.session_state.att_session_id
-            )
-            if session_data and session_data.get("final_results"):
-                st.session_state.att_final_results = session_data["final_results"]
-                st.session_state.att_final_shown = True
-            st.rerun()
-            break
+    # ─── Live update loop (no st.rerun — uses in-place placeholder updates) ───
+    while engine.session_active:
+        status = engine.get_status()
 
-        # ── Darkness Warning Banner ──
-        with darkness_banner.container():
-            if status.get("paused"):
-                st.markdown(
-                    """
-                    <div style="
-                        background: linear-gradient(135deg, #b71c1c 0%, #880e0e 100%);
-                        border: 2px solid #ff5252;
-                        border-radius: 12px;
-                        padding: 20px;
-                        text-align: center;
-                        margin-bottom: 10px;
-                        animation: pulse 2s ease-in-out infinite;
-                    ">
-                        <h3 style="margin:0; color:#ff8a80;">⚠️ LOW LIGHT DETECTED — Session Paused</h3>
-                        <p style="margin:5px 0 0 0; color:#ffcdd2;">
-                            Waiting for lights to be restored...
-                        </p>
-                    </div>
-                    <style>
-                        @keyframes pulse {
-                            0%, 100% { opacity: 1; }
-                            50% { opacity: 0.7; }
-                        }
-                    </style>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            elif retry_info.get("active"):
-                rem = retry_info.get("seconds_remaining", 0)
-                att = retry_info.get("attempt", 1)
-                mx = retry_info.get("max_attempts", 3)
-                cn = retry_info.get("check_number", 0)
-                st.markdown(
-                    f"""
-                    <div style="
-                        background: linear-gradient(135deg, #e65100 0%, #bf360c 100%);
-                        border: 2px solid #ff9800;
-                        border-radius: 12px;
-                        padding: 16px;
-                        text-align: center;
-                        margin-bottom: 10px;
-                    ">
-                        <h4 style="margin:0; color:#ffe0b2;">
-                            🔄 Retrying Check {cn} in {rem:.0f}s...
-                        </h4>
-                        <p style="margin:5px 0 0 0; color:#ffcc80;">
-                            Attempt {att}/{mx} — Waiting for sufficient lighting
-                        </p>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            elif brightness.get("quality_label") == "LOW_LIGHT":
-                st.markdown(
-                    """
-                    <div style="
-                        background: linear-gradient(135deg, #f57f17 0%, #e65100 100%);
-                        border: 1px solid #ffc107;
-                        border-radius: 10px;
-                        padding: 12px;
-                        text-align: center;
-                        margin-bottom: 10px;
-                    ">
-                        <p style="margin:0; color:#fff8e1;">
-                            ⚡ <strong>Low light detected</strong> — Auto-enhancing frames for better recognition
-                        </p>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-        # ── Status Bar ──
-        elapsed = status["elapsed_seconds"]
-        mins = int(elapsed // 60)
-        secs = int(elapsed % 60)
-
-        with status_container.container():
-            sc1, sc2, sc3, sc4, sc5 = st.columns(5)
-            sc1.metric("⏱️ Elapsed", f"{mins:02d}:{secs:02d}")
-            sc2.metric("📊 Checks", f"{status['checks_completed']}/{status['total_checks']}")
-            sc3.metric("⏳ Next In", f"{status['next_check_in']:.0f}s")
-
-            # Brightness indicator
-            br_val = brightness.get("brightness", 128)
-            br_label = brightness.get("quality_label", "GOOD")
-            if br_label == "GOOD":
-                sc4.metric("💡 Light", f"{br_val:.0f}", delta="Good", delta_color="normal")
-            elif br_label == "LOW_LIGHT":
-                sc4.metric("💡 Light", f"{br_val:.0f}", delta="Low", delta_color="off")
-            elif br_label == "DARK":
-                sc4.metric("💡 Light", f"{br_val:.0f}", delta="Dark!", delta_color="inverse")
+        # Update status bar in-place
+        with status_placeholder.container():
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric("⏱️ Elapsed",
+                       f"{int(status.elapsed_seconds//60):02d}:{int(status.elapsed_seconds%60):02d}")
+            sc2.metric("📊 Checks", f"{status.checks_completed}/{status.total_checks}")
+            sc3.metric("⏳ Next In", f"{status.next_check_in:.0f}s")
+            if status.check_running:
+                sc4.metric("📡 Status", "📸 CHECK")
+            elif status.paused:
+                sc4.metric("📡 Status", "⏸️ PAUSED")
             else:
-                sc4.metric("💡 Light", f"{br_val:.0f}", delta=br_label, delta_color="off")
+                sc4.metric("📡 Status", "🔴 LIVE")
 
-            # Session status + spoofing
-            spoof_count = monitor.get_spoofing_count() if hasattr(monitor, 'get_spoofing_count') else 0
-            if status.get("paused"):
-                sc5.metric("📡 Status", "⏸️ PAUSED")
-            elif status["check_running"]:
-                sc5.metric("📡 Status", "📸 CHECK")
+        # Update info panel in-place
+        latest = engine.get_latest_frame_result()
+        with info_placeholder.container():
+            if latest:
+                st.markdown("#### 📡 Live Recognition")
+                mc1, mc2 = st.columns(2)
+                mc1.metric("Detected", latest.num_detected)
+                mc2.metric("Recognized", latest.num_recognized)
+
+                if latest.faces:
+                    for face in latest.faces:
+                        if face.recognition:
+                            if face.recognition.state == RecognitionState.KNOWN:
+                                st.success(f"✅ {face.recognition.name} "
+                                          f"({face.recognition.confidence:.0%})")
+                            elif face.recognition.state == RecognitionState.UNKNOWN:
+                                st.info("❓ Unknown")
+                            elif face.recognition.state == RecognitionState.AMBIGUOUS:
+                                st.warning("⚠️ Ambiguous")
+                            elif face.recognition.state == RecognitionState.REJECTED:
+                                st.error("🔴 Rejected")
+
+                st.markdown("---")
+                st.markdown("#### 📋 Schedule")
+                check_times = engine.check_times
+                unit = "sec" if engine.demo_mode else "min"
+                for i, ct in enumerate(check_times):
+                    cn = i + 1
+                    if cn <= status.checks_completed:
+                        icon = "✅"
+                    elif cn == status.checks_completed + 1:
+                        icon = "⏳"
+                    else:
+                        icon = "⬜"
+                    st.caption(f"{icon} Check {cn} @ {ct}{unit}")
             else:
-                sc5.metric("📡 Status", "🔴 LIVE")
+                st.info("📷 Waiting for frames...")
 
-            # Spoofing alert
-            if spoof_count > 0:
-                st.markdown(
-                    f'<div style="background:rgba(255,0,0,0.15);border:1px solid #f44336;'
-                    f'border-radius:8px;padding:8px 16px;text-align:center;'
-                    f'margin-bottom:10px;">'
-                    f'🚨 <strong style="color:#ff5252;">{spoof_count} spoofing attempt(s) blocked!</strong>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
+            if status.spoofing_count > 0:
+                st.warning(f"🚫 {status.spoofing_count} spoofing attempt(s) blocked")
 
-        # ── Fallback cv2 frame display (when WebRTC unavailable) ──
+        # cv2 fallback: ONLY when streamlit-webrtc is not installed at all.
+        # When WebRTC IS available, the browser is the sole camera owner.
+        # Do NOT open cv2 camera during WebRTC ICE negotiation — it grabs
+        # the device on the server side and never releases it.
         if not _HAS_WEBRTC:
-            frame, detections = monitor.get_live_frame()
-            if frame is not None:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                with frame_placeholder.container():
-                    st.image(rgb, caption="Live Feed — Face Detection", width="stretch")
-                    if status["check_running"]:
-                        st.warning(f"📸 **Running Check #{status['checks_completed'] + 1}...**")
-            else:
-                with frame_placeholder.container():
-                    st.info("📷 Waiting for camera feed...")
-
-        # ── Check Schedule Panel ──
-        schedule = monitor.get_check_schedule_info()
-        with check_placeholder.container():
-            st.markdown("#### 📋 Check Schedule")
-            for chk in schedule:
-                num = chk["check_number"]
-                t = chk["time_value"]
-                u = chk["unit"]
-                s = chk["status"]
-
-                if s == "completed":
-                    icon, label = "✅", "Done"
-                elif s == "partial":
-                    icon, label = "🟡", "Partial"
-                elif s == "retried":
-                    icon, label = "🔄", "Retried"
-                elif s == "failed_dark":
-                    icon, label = "🌑", "Failed (Dark)"
-                elif s == "skipped_dark":
-                    icon, label = "⛔", "Skipped (Dark)"
-                elif s == "next":
-                    icon, label = "⏳", "Next"
-                else:
-                    icon, label = "⬜", "Pending"
-
-                st.markdown(f"{icon} Check {num} @ {t}{u} — **{label}**")
-
-            st.markdown("---")
-            st.caption(f"Session: {status['session_id']}")
-            st.caption(f"Class: {status['class_name']}")
-            st.caption(status["status"])
-
-            # Brightness info
-            st.markdown("---")
-            st.markdown("#### 💡 Light Status")
-            br_label = brightness.get("quality_label", "GOOD")
-            br_msg = brightness.get("message", "")
-            if br_label == "GOOD":
-                st.success(f"🟢 {br_msg}")
-            elif br_label == "LOW_LIGHT":
-                st.warning(f"🟡 {br_msg}")
-            elif br_label == "DARK":
-                st.error(f"🔴 {br_msg}")
-            elif br_label == "TOO_BRIGHT":
-                st.warning(f"🔵 {br_msg}")
-
-        # Rate limit the panel refresh (video is real-time via WebRTC)
-        time.sleep(0.5)
-
-    # ── Final Results Display ──
-    if st.session_state.get("att_final_shown") and st.session_state.get("att_final_results"):
-        # ── Twin Review Queue ──
-        review_queue = monitor.get_review_queue()
-        if review_queue:
-            _render_review_queue(review_queue, monitor)
-
-        _render_final_results(
-            st.session_state.att_final_results,
-            st.session_state.att_session_id,
-            monitor.attendance_store,
-            face_db,
-            monitor,
-        )
-
-        if st.button("🔄 Start New Session", type="primary", width="stretch"):
-            st.session_state.att_session_active = False
-            st.session_state.att_session_id = None
-            st.session_state.att_final_shown = False
-            st.session_state.att_final_results = None
-            st.rerun()
-
-
-def _render_review_queue(review_queue, monitor):
-    """Render the twin/uncertain detection review queue."""
-    unresolved = [r for r in review_queue if not r.get("resolved")]
-    if not unresolved:
-        return
-
-    st.markdown("---")
-    st.markdown(
-        f"## ⚠️ {len(unresolved)} Detection(s) Need Teacher Review"
-    )
-    st.markdown(
-        "These detections involve twin/lookalike students. "
-        "Please confirm the correct identity."
-    )
-
-    for idx, item in enumerate(review_queue):
-        if item.get("resolved"):
-            continue
-
-        check_num = item.get("check_number", "?")
-        name_a = item.get("name_a", "Student A")
-        name_b = item.get("name_b", "Student B")
-        score_a = item.get("score_a", 0)
-        score_b = item.get("score_b", 0)
-        sid_a = item.get("student_a", "")
-        sid_b = item.get("student_b", "")
-        crop_path = item.get("crop_path")
-
-        with st.container():
-            st.markdown(
-                f"""
-                <div style="
-                    background: rgba(255,165,0,0.1);
-                    border: 1px solid #ff9800;
-                    border-radius: 10px;
-                    padding: 15px;
-                    margin: 10px 0;
-                ">
-                    <strong>Check #{check_num}</strong>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            rc1, rc2, rc3 = st.columns([1, 2, 1])
-
-            with rc1:
-                if crop_path:
+            if not rt.camera.is_opened():
+                rt.camera.open()
+            if rt.camera.is_opened():
+                frame = rt.camera.read_frame()
+                if frame is not None:
+                    rt.external_buffer.push(frame)
                     try:
-                        crop_img = cv2.imread(crop_path)
-                        if crop_img is not None:
-                            rgb = cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB)
-                            st.image(rgb, caption="Detected Face", width="stretch")
+                        frame_result = rt.pipeline.process_frame(
+                            frame, run_liveness=True)
+                        with engine._lock:
+                            engine._latest_frame_result = frame_result
+                        annotated = _draw_frame_overlays(frame.copy(), frame_result)
+                        rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+                        feed_placeholder.image(rgb, channels="RGB")
                     except Exception:
-                        st.info("📷 Face image unavailable")
-                else:
-                    st.info("📷 No face crop saved")
+                        pass
 
-            with rc2:
-                st.markdown(
-                    f"**Is this {name_a} ({score_a:.0%}) or {name_b} ({score_b:.0%})?**"
-                )
-                diff = item.get("difference", 0)
-                st.caption(f"Similarity difference: {diff:.4f} (below threshold {Config.MIN_TWIN_DIFFERENCE})")
+        # Throttle refresh
+        time.sleep(1)
 
-            with rc3:
-                if st.button(
-                    f"✅ {name_a}",
-                    key=f"resolve_{idx}_a",
-                    width="stretch",
-                ):
-                    monitor.resolve_review(idx, sid_a)
-                    st.rerun()
-
-                if st.button(
-                    f"✅ {name_b}",
-                    key=f"resolve_{idx}_b",
-                    width="stretch",
-                ):
-                    monitor.resolve_review(idx, sid_b)
-                    st.rerun()
-
-                if st.button(
-                    "⏭️ Skip",
-                    key=f"resolve_{idx}_skip",
-                    width="stretch",
-                ):
-                    monitor.resolve_review(idx, item.get("assigned_to", sid_a))
-                    st.rerun()
-
-
-def _render_final_results(final_results, session_id, attendance_store, face_db, monitor=None):
-    """Render the final attendance results table with darkness anomaly notes."""
-
-    st.markdown("---")
-    st.markdown("## 📊 Final Attendance Results")
-
-    # Anti-spoofing summary
-    if monitor and hasattr(monitor, 'get_spoofing_count'):
-        spoof_count = monitor.get_spoofing_count()
-        if spoof_count > 0:
-            st.markdown(
-                f'<div style="background:linear-gradient(135deg,#b71c1c,#880e0e);'
-                f'border-radius:10px;padding:15px;margin:10px 0;">'
-                f'<span style="font-size:1.2em;">🛡️</span> '
-                f'<strong style="color:#ffcdd2;">{spoof_count} spoofing attempt(s) blocked</strong>'
-                f'<span style="color:#ef9a9a;"> during this session</span>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.success("🛡️ No spoofing attempts detected — session clean")
-
-    if not final_results:
-        st.warning("No results available.")
-        return
-
-    session = attendance_store.get_session(session_id) if session_id else None
-    checks = session.get("checks", {}) if session else {}
-    session_status = session.get("status", "") if session else ""
-    session_notes = session.get("notes", []) if session else []
-    students = face_db.get_all_students()
-
-    # ── Session cancelled due to darkness ──
-    if session_status == "cancelled_dark":
-        st.error(
-            "❌ **Session cancelled — insufficient lighting for all checks**\n\n"
-            "No attendance was recorded. Teacher can mark attendance manually."
-        )
-        if session_notes:
-            with st.expander("📝 Session Notes"):
-                for note in session_notes:
-                    st.caption(f"• {note}")
-        return
-
-    # ── Session notes / anomalies ──
-    if session_notes:
-        with st.expander("⚠️ Session Notes & Anomalies", expanded=True):
-            for note in session_notes:
-                st.caption(f"• {note}")
-
-    # Check for darkness-affected checks
-    dark_checks = [
-        cn for cn, cd in checks.items()
-        if cd.get("status") in ("partial", "failed_dark", "skipped_dark", "retried")
-    ]
-    if dark_checks:
-        st.warning(
-            f"⚠️ **{len(dark_checks)}** check(s) were affected by lighting conditions. "
-            "See the Notes column for details."
-        )
-
-    # Build results table
-    rows = []
-    present_count = absent_count = review_count = spoofed_flag_count = 0
-
-    for sid, result in final_results.items():
-        name = result.get("name", students.get(sid, {}).get("name", sid))
-        total_present = result["checks_present"]
-        total_spoofed = result.get("checks_spoofed", 0)
-        status = result["status"]
-        note = result.get("note", "")
-
-        # Per-check marks with status info
-        check_marks = {}
-        for cn_str, check_data in checks.items():
-            cn = int(cn_str)
-            check_status = check_data.get("status", "completed")
-            detected = check_data.get("detected", [])
-            spoofed = check_data.get("spoofed", [])
-
-            if check_status in ("failed_dark", "skipped_dark"):
-                check_marks[f"Check {cn}"] = "🌑"  # Darkness
-            elif sid in spoofed:
-                check_marks[f"Check {cn}"] = "🚫"  # Spoofed
-            elif sid in detected:
-                check_marks[f"Check {cn}"] = "✅"
-            else:
-                check_marks[f"Check {cn}"] = "❌"
-
-        # Count valid checks
-        valid_checks = sum(
-            1 for cd in checks.values()
-            if cd.get("status") in ("completed", "partial", "retried")
-        )
-
-        row = {"Student": name, "ID": sid}
-        # Add review marker for twin-affected students
-        if result.get("needs_review"):
-            row["Student"] = f"🔍 {name}"
-        row.update(check_marks)
-        row["Total"] = f"{total_present}/{valid_checks}"
-        if total_spoofed > 0:
-            row["Spoofed"] = f"{total_spoofed}/{valid_checks}"
-        else:
-            row["Spoofed"] = "0"
-        if result.get("needs_review"):
-            row["Status"] = "NEEDS_REVIEW"
-        else:
-            row["Status"] = status.upper()
-        if note:
-            row["Notes"] = note
-        else:
-            row["Notes"] = ""
-        rows.append(row)
-
-        if status == "present":
-            present_count += 1
-        elif status == "insufficient_data":
-            review_count += 1
-        else:
-            absent_count += 1
-        if total_spoofed > 0:
-            spoofed_flag_count += 1
-
-    # Summary metrics
-    mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("👥 Total", len(final_results))
-    mc2.metric("✅ Present", present_count)
-    mc3.metric("❌ Absent", absent_count)
-    if spoofed_flag_count > 0:
-        mc4.metric("🚫 Spoofed", spoofed_flag_count)
-    elif review_count > 0:
-        mc4.metric("🔍 Needs Review", review_count)
-    else:
-        mc4.metric("🚫 Spoofed", 0)
-
-    # Results table with color coding
-    if rows:
-        df = pd.DataFrame(rows)
-
-        def color_status(val):
-            if val == "PRESENT":
-                return "background-color: #1b5e20; color: #a5d6a7"
-            elif val == "ABSENT":
-                return "background-color: #b71c1c; color: #ef9a9a"
-            elif val == "INSUFFICIENT_DATA":
-                return "background-color: #4a148c; color: #ce93d8"
-            elif val == "NEEDS_REVIEW":
-                return "background-color: #e65100; color: #ffab40"
-            return ""
-
-        styled = df.style.map(color_status, subset=["Status"])
-        st.dataframe(styled, use_container_width=True, hide_index=True)
-    else:
-        st.info("No student data to display.")
-
-    # Check details expander
-    if checks:
-        with st.expander("📋 Check Details"):
-            for cn_str in sorted(checks.keys(), key=lambda x: int(x)):
-                cd = checks[cn_str]
-                cn = int(cn_str)
-                cs = cd.get("status", "completed")
-                ct = cd.get("time", "N/A")
-                if len(ct) > 18:
-                    ct = ct[11:19]
-                cn_note = cd.get("note", "")
-                det_count = cd.get("count", 0)
-                uf = cd.get("usable_frames")
-                tf = cd.get("total_frames")
-
-                # Status icon
-                if cs == "completed":
-                    s_icon = "✅"
-                elif cs == "partial":
-                    s_icon = "🟡"
-                elif cs == "retried":
-                    s_icon = "🔄"
-                elif cs == "failed_dark":
-                    s_icon = "🌑"
-                elif cs == "skipped_dark":
-                    s_icon = "⛔"
-                else:
-                    s_icon = "⬜"
-
-                line = f"{s_icon} **Check {cn}** at {ct} — {det_count} detected [{cs}]"
-                if uf is not None and tf is not None:
-                    line += f" ({uf}/{tf} frames)"
-                st.markdown(line)
-                if cn_note:
-                    st.caption(f"   ↳ {cn_note}")
+    # ─── Session just ended (loop exited): clean up and rerun ───
+    # Release camera, tear down WebRTC, and rerun so the page re-renders
+    # WITHOUT the frozen camera feed — showing only the final results.
+    if not _HAS_WEBRTC and rt.camera.is_opened():
+        rt.camera.release()
+    _cleanup_webrtc()
+    st.rerun()

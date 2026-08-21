@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "attndx"
+version = "2.0.0"
+description = "AI Smart Face Attendance System"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["."]
+
+[tool.setuptools]
+packages = [
+    "attendance",
+    "config",
+    "enrollment",
+    "evaluation",
+    "recognition",
+    "scripts",
+    "storage",
+    "ui",
+    "vision",
+]

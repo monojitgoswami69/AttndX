@@ -1,41 +1,27 @@
 # =============================================================================
-# Gitignore for AI Smart Attendance System (AttndX / Gen2)
+# Gitignore for AI Smart Attendance System (AttndX)
 # Production-Grade Privacy & Security Rules
 # =============================================================================
 
 # ─── 1. USER BIOMETRICS & PRIVATE FACE IMAGES (CRITICAL PRIVACY) ───────────
-# Gen2 captured enrollment images and crops
-gen2/data/captures/*
-!gen2/data/captures/.gitkeep
+# Captured enrollment face images and crops
+data/captures/*
+!data/captures/.gitkeep
 
-# Gen2 live attendance session snapshots
-gen2/data/snapshots/*
-!gen2/data/snapshots/.gitkeep
+# Live attendance session snapshots
+data/snapshots/*
+!data/snapshots/.gitkeep
 
-# Gen2 evaluation artifacts
-gen2/data/eval/*
-!gen2/data/eval/.gitkeep
+# Evaluation artifacts
+data/eval/*
+!data/eval/.gitkeep
 
-# Legacy Gen1 face photos and session snapshots
-storage/registered_faces/
-storage/registered_faces/*
-storage/session_snapshots/
-storage/session_snapshots/*
-storage/*.pkl
-storage/*.json
-storage/*.csv
-
-# General image & video patterns in data / storage directories
-gen2/data/**/*.jpg
-gen2/data/**/*.jpeg
-gen2/data/**/*.png
-gen2/data/**/*.webp
-gen2/data/**/*.bmp
-storage/**/*.jpg
-storage/**/*.jpeg
-storage/**/*.png
-storage/**/*.webp
-storage/**/*.bmp
+# General image & media patterns in data/
+data/**/*.jpg
+data/**/*.jpeg
+data/**/*.png
+data/**/*.webp
+data/**/*.bmp
 *.jpg
 *.jpeg
 *.png
@@ -54,10 +40,10 @@ attendance_*.csv
 *.db-wal
 *.db-shm
 *.db-journal
-gen2/data/*.db
-gen2/data/*.db-wal
-gen2/data/*.db-shm
-gen2/data/*.db-journal
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.db-journal
 
 # ─── 3. MACHINE LEARNING MODELS & WEIGHTS ───────────────────────────────────
 # Auto-downloaded / large model weights
@@ -69,23 +55,14 @@ gen2/data/*.db-journal
 *.weights
 *.h5
 *.engine
-
-# Keep directory structures intact via .gitkeep
-!models/.gitkeep
-!gen2/data/models/.gitkeep
-!storage/.gitkeep
-
-# MiniFASNetV2 anti-spoofing model (converted locally, required for base runtime)
-!models/MiniFASNetV2.onnx
+data/models/*
+!data/models/.gitkeep
 
 # ─── 4. VIRTUAL ENVIRONMENTS & DEPENDENCIES ─────────────────────────────────
 venv/
 .venv/
 env/
 ENV/
-gen2/venv/
-gen2/.venv/
-gen2/env/
 build/
 dist/
 *.egg-info/
@@ -94,11 +71,10 @@ dist/
 
 # ─── 5. PYTHON BYTECODE & CACHES ────────────────────────────────────────────
 __pycache__/
-gen2/**/__pycache__/
+**/*/__pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
-gen2/.pytest_cache/
 .coverage
 htmlcov/
 .mypy_cache/
