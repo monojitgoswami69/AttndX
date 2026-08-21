@@ -7,7 +7,14 @@ and clean resource shutdown. Decoupled from recognition logic.
 Supports:
   - cv2.VideoCapture (local camera)
   - External frame buffer (for WebRTC — frames pushed by VideoProcessor)
+
+Privacy invariant:
+  - The cv2 camera is ONLY opened when no WebRTC source is available.
+  - It MUST be released when the session ends, the app shuts down,
+    or the object is garbage-collected.
+  - atexit and __del__ serve as last-resort safety nets.
 """
+import atexit
 import logging
 import threading
 import time
@@ -19,9 +26,29 @@ from gen2.config import Config
 
 logger = logging.getLogger(__name__)
 
+# Registry of all CameraSource instances for atexit cleanup
+_active_cameras: list["CameraSource"] = []
+_atexit_registered = False
+
+
+def _atexit_release_all():
+    """Release all camera devices on process exit."""
+    for cam in _active_cameras:
+        try:
+            cam.release()
+        except Exception:
+            pass
+    _active_cameras.clear()
+
 
 class CameraSource:
-    """OpenCV VideoCapture wrapper with fallback and error handling."""
+    """OpenCV VideoCapture wrapper with fallback and error handling.
+
+    Guarantees camera release via:
+      1. Explicit .release() call (primary — engine/UI responsibility)
+      2. __del__ (secondary — GC fallback)
+      3. atexit handler (tertiary — process exit fallback)
+    """
 
     def __init__(self, index: int | None = None):
         self.index = index if index is not None else Config.get("camera", "index")
@@ -29,6 +56,20 @@ class CameraSource:
         self.height = Config.get("camera", "height")
         self._cap: cv2.VideoCapture | None = None
         self._lock = threading.Lock()
+
+        # Register for atexit cleanup
+        _active_cameras.append(self)
+        global _atexit_registered
+        if not _atexit_registered:
+            atexit.register(_atexit_release_all)
+            _atexit_registered = True
+
+    def __del__(self):
+        """GC fallback: release camera if caller forgot."""
+        try:
+            self.release()
+        except Exception:
+            pass
 
     def open(self, index: int | None = None) -> bool:
         """Open the camera. Returns True on success."""

@@ -21,7 +21,9 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 
+import cv2
 import numpy as np
 
 from gen2.config import Config
@@ -112,6 +114,8 @@ class EnrollmentService:
         # ── Process each frame: detect → align → quality → embed ──
         valid_embeddings: list[np.ndarray] = []
         valid_quality_scores: list[float] = []
+        valid_frames: list[np.ndarray] = []     # raw frames for saving
+        valid_aligned: list[np.ndarray] = []     # aligned 112x112 crops for saving
 
         for i, frame in enumerate(frames):
             if frame is None or frame.size == 0:
@@ -154,6 +158,8 @@ class EnrollmentService:
 
             valid_embeddings.append(emb_result.vector)
             valid_quality_scores.append(q_result.overall_score)
+            valid_frames.append(frame)
+            valid_aligned.append(aligned)
 
         result.samples_stored = len(valid_embeddings)
 
@@ -231,6 +237,9 @@ class EnrollmentService:
         if stored_template is None or not np.allclose(stored_template, template):
             result.issues.append("WARNING: verification failed — stored template mismatch")
 
+        # ── Save raw captures and aligned crops to disk ──
+        self._save_captures(identity_id, valid_frames, valid_aligned)
+
         result.status = EnrollmentStatus.SUCCESS
         logger.info(
             f"Enrolled {identity_id} ({name}): {len(valid_embeddings)} samples, "
@@ -239,11 +248,17 @@ class EnrollmentService:
         return result
 
     def delete_identity(self, identity_id: str) -> bool:
-        """Delete an identity. Updates DB + index."""
+        """Delete an identity. Updates DB + index + removes saved captures."""
         if not self.db.identity_exists(identity_id):
             return False
         self.db.delete_identity(identity_id)
         self.index.remove_identity(identity_id)
+        # Remove saved face captures from disk
+        cap_dir = Config.captures_dir() / identity_id
+        if cap_dir.exists():
+            import shutil
+            shutil.rmtree(cap_dir, ignore_errors=True)
+            logger.info(f"Removed captures for {identity_id}")
         logger.info(f"Deleted identity {identity_id}")
         return True
 
@@ -288,3 +303,30 @@ class EnrollmentService:
 
     def _generate_id(self) -> str:
         return str(uuid.uuid4())[:12]
+
+    def _save_captures(self, identity_id: str,
+                       frames: list[np.ndarray],
+                       aligned: list[np.ndarray]):
+        """Save raw frames and aligned face crops to captures_dir/identity_id/.
+
+        Layout:
+          captures/<identity_id>/
+            raw_01.jpg       # original camera frame
+            raw_02.jpg
+            aligned_01.png   # 112x112 aligned crop (what the model sees)
+            aligned_02.png
+        """
+        cap_dir = Config.captures_dir() / identity_id
+        cap_dir.mkdir(parents=True, exist_ok=True)
+
+        for i, (frame, crop) in enumerate(zip(frames, aligned), start=1):
+            raw_path = cap_dir / f"raw_{i:02d}.jpg"
+            aligned_path = cap_dir / f"aligned_{i:02d}.png"
+            try:
+                cv2.imwrite(str(raw_path), frame,
+                            [cv2.IMWRITE_JPEG_QUALITY, 95])
+                cv2.imwrite(str(aligned_path), crop)
+            except Exception as e:
+                logger.warning(f"Failed to save capture {i} for {identity_id}: {e}")
+
+        logger.info(f"Saved {len(frames)} captures to {cap_dir}")

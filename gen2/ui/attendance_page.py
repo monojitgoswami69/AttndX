@@ -17,7 +17,16 @@ try:
 except Exception:
     _HAS_WEBRTC = False
 
-_RTC_CONFIG = RTCConfiguration(ice_servers=[]) if _HAS_WEBRTC else None
+# ICE servers for WebRTC connection establishment.
+# STUN servers are required for ICE candidate gathering — without them,
+# the connection silently fails on Windows and many browsers.
+_RTC_CONFIG = RTCConfiguration(
+    ice_servers=[
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun2.l.google.com:19302"]},
+    ]
+) if _HAS_WEBRTC else None
 
 
 def _cleanup_webrtc():
@@ -30,6 +39,8 @@ def _cleanup_webrtc():
         except Exception:
             pass
         st.session_state.pop("_webrtc_ctx", None)
+    # Reset connection tracking
+    st.session_state.pop("_webrtc_connect_time", None)
 
 # Colors (BGR)
 _GREEN = (0, 200, 0)
@@ -195,8 +206,49 @@ def render_attendance_page(rt):
         )
     engine = st.session_state.att_engine
 
-    # ─── Pre-session: subject selection + start ───
+    # ─── Pre-session / Post-session: not actively running ───
     if not engine.session_active:
+        # Show final results if a session just completed
+        if engine.session_id is not None:
+            st.markdown("---")
+            st.markdown("## 📊 Final Results")
+            attendance = rt.attendance_db.get_attendance(engine.session_id)
+            if attendance:
+                rows = []
+                for a in attendance:
+                    rows.append({
+                        "Student": a["name"],
+                        "Status": a["status"].upper(),
+                        "Present": f"{a['checks_present']}",
+                        "Spoofed": a["checks_spoofed"],
+                        "Note": a["note"],
+                    })
+                df = pd.DataFrame(rows)
+
+                # Summary metrics
+                present = sum(1 for a in attendance if a["status"] == "present")
+                absent = sum(1 for a in attendance if a["status"] == "absent")
+                mc1, mc2, mc3 = st.columns(3)
+                mc1.metric("👥 Total", len(attendance))
+                mc2.metric("✅ Present", present)
+                mc3.metric("❌ Absent", absent)
+
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.download_button("📥 Download CSV", df.to_csv(index=False),
+                                  file_name=f"attendance_{engine.session_id}.csv")
+            else:
+                st.info("No attendance data recorded for this session.")
+
+            st.markdown("---")
+            if st.button("🔄 Start New Session", type="primary", use_container_width=True):
+                _cleanup_webrtc()
+                if st.session_state.get("att_engine") is not None:
+                    st.session_state.att_engine._release_camera()
+                st.session_state.att_engine = None
+                st.rerun()
+            return
+
+        # No completed session — show start controls
         demo = Config.get("attendance", "demo_mode")
         times = Config.get("attendance", "check_times_demo" if demo else "check_times_normal")
         unit = "sec" if demo else "min"
@@ -220,7 +272,7 @@ def render_attendance_page(rt):
         )
         selected_name = subjects[list(subject_options).index(selected_sid)]["name"]
 
-        if st.button("▶️ Start Session", type="primary", width="stretch"):
+        if st.button("▶️ Start Session", type="primary", use_container_width=True):
             sid = engine.start_session(selected_name)
             if sid:
                 st.rerun()
@@ -253,12 +305,56 @@ def render_attendance_page(rt):
                 key="attendance-live",
                 video_processor_factory=lambda e=engine: AttendanceVideoProcessor(e),
                 rtc_configuration=_RTC_CONFIG,
-                media_stream_constraints={"video": True, "audio": False},
+                media_stream_constraints={
+                    "video": {
+                        "width": {"ideal": 640},
+                        "height": {"ideal": 480},
+                        "facingMode": "user",
+                    },
+                    "audio": False,
+                },
                 desired_playing_state=True,
                 async_processing=True,
             )
             # Cache context so we can clean it up on session stop
             st.session_state["_webrtc_ctx"] = webrtc_ctx
+
+            # ── Connection status feedback ──
+            if webrtc_ctx.state.playing:
+                # Connected successfully — clear any tracking
+                st.session_state.pop("_webrtc_connect_time", None)
+            else:
+                # Not playing — track how long we've been waiting
+                if "_webrtc_connect_time" not in st.session_state:
+                    st.session_state["_webrtc_connect_time"] = time.time()
+                wait_secs = time.time() - st.session_state["_webrtc_connect_time"]
+
+                if wait_secs < 8:
+                    st.info("📷 Connecting to camera... Please allow camera access if prompted.")
+                elif wait_secs < 20:
+                    st.warning(
+                        "⏳ **Camera connection is taking longer than expected.**\n\n"
+                        "**Try these steps:**\n"
+                        "1. Click **Allow** if the browser asked for camera permission\n"
+                        "2. Check that no other app is using the camera\n"
+                        "3. Try refreshing the page (F5)\n"
+                        "4. On Windows: try Chrome or Edge (Firefox may have issues)"
+                    )
+                else:
+                    st.error(
+                        "❌ **Camera connection failed.**\n\n"
+                        "The WebRTC video feed could not be established. This can happen when:\n"
+                        "- Camera permissions were denied in the browser\n"
+                        "- Another application is using the camera\n"
+                        "- Your browser or network blocks WebRTC connections\n"
+                        "- A firewall is blocking STUN/TURN traffic\n\n"
+                        "**Stop the session and try again after fixing the issue.**"
+                    )
+        else:
+            st.warning(
+                "⚠️ `streamlit-webrtc` not installed. Camera feed unavailable.\n\n"
+                "Install with: `pip install streamlit-webrtc`"
+            )
         # Placeholder below the WebRTC component for cv2 fallback
         feed_placeholder = st.empty()
 
@@ -324,9 +420,11 @@ def render_attendance_page(rt):
             if status.spoofing_count > 0:
                 st.warning(f"🚫 {status.spoofing_count} spoofing attempt(s) blocked")
 
-        # cv2 fallback: if WebRTC isn't playing, read from cv2 camera
-        webrtc_playing = (webrtc_ctx and webrtc_ctx.state.playing) if webrtc_ctx else False
-        if not webrtc_playing:
+        # cv2 fallback: ONLY when streamlit-webrtc is not installed at all.
+        # When WebRTC IS available, the browser is the sole camera owner.
+        # Do NOT open cv2 camera during WebRTC ICE negotiation — it grabs
+        # the device on the server side and never releases it.
+        if not _HAS_WEBRTC:
             if not rt.camera.is_opened():
                 rt.camera.open()
             if rt.camera.is_opened():
@@ -347,27 +445,10 @@ def render_attendance_page(rt):
         # Throttle refresh
         time.sleep(1)
 
-    # ─── Session ended: show final results ───
-    st.markdown("---")
-    st.markdown("## 📊 Final Results")
-    if engine.session_id:
-        attendance = rt.attendance_db.get_attendance(engine.session_id)
-        if attendance:
-            rows = []
-            for a in attendance:
-                rows.append({
-                    "Student": a["name"],
-                    "Status": a["status"].upper(),
-                    "Present": f"{a['checks_present']}",
-                    "Spoofed": a["checks_spoofed"],
-                    "Note": a["note"],
-                })
-            df = pd.DataFrame(rows)
-            st.dataframe(df, width="stretch", hide_index=True)
-            st.download_button("📥 CSV", df.to_csv(index=False),
-                              file_name=f"attendance_{engine.session_id}.csv")
-
-    if st.button("🔄 Start New Session", type="primary"):
-        _cleanup_webrtc()
-        st.session_state.att_engine = None
-        st.rerun()
+    # ─── Session just ended (loop exited): clean up and rerun ───
+    # Release camera, tear down WebRTC, and rerun so the page re-renders
+    # WITHOUT the frozen camera feed — showing only the final results.
+    if not _HAS_WEBRTC and rt.camera.is_opened():
+        rt.camera.release()
+    _cleanup_webrtc()
+    st.rerun()

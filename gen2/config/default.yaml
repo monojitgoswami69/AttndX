@@ -151,11 +151,11 @@ liveness:
 attendance:
   # Session checks schedule
   demo_mode: true                          # seconds-based for testing
-  check_times_demo: [20, 40, 60]           # seconds from session start
+  check_times_demo: [10, 20, 30]           # seconds from session start
   check_times_normal: [15, 30, 45]         # minutes from session start
-  frame_interval_demo: 2                  # seconds between frames in a check
+  frame_interval_demo: 0.5                # seconds between frames in a check
   frame_interval_normal: 6
-  frames_per_check: 5
+  frames_per_check: 3                     # 3 frames × 0.5s = ~1.5s per check
   # Min "present" checks to mark attendance
   min_checks_for_present: 2
   # Temporal confirmation: track must be identity-confirmed for this many

@@ -108,7 +108,15 @@ class AppRuntime:
             cls()
         return cls._instance
 
+    def shutdown(self):
+        """Release all hardware resources (camera, etc.)."""
+        if hasattr(self, 'camera') and self.camera.is_opened():
+            self.camera.release()
+            logger.info("Runtime shutdown: camera released")
+
     @classmethod
     def reset(cls):
         """Reset the singleton (for testing)."""
+        if cls._instance is not None:
+            cls._instance.shutdown()
         cls._instance = None

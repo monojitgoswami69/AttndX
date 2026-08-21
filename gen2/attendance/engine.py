@@ -103,16 +103,27 @@ class AttendanceEngine:
             logger.warning("No enrolled identities — cannot start session")
             return None
 
-        # Open cv2 camera as a fallback (even in WebRTC mode — if WebRTC
-        # fails to connect on some platforms e.g. Windows link-local issues,
-        # the check thread can still read frames from cv2)
-        if not self.camera.is_opened():
-            try:
-                self.camera.open()
-                if self.camera.is_opened():
-                    logger.info("cv2 camera opened as fallback source")
-            except Exception as e:
-                logger.warning(f"cv2 camera open failed (will rely on external): {e}")
+        # Camera strategy:
+        #   WebRTC mode (_use_external=True):  browser owns the camera.
+        #     Do NOT open cv2.VideoCapture — it would grab the device
+        #     on the server side, preventing the browser from accessing it
+        #     on some OSes, and it stays open as a privacy leak.
+        #   cv2 mode (_use_external=False): open the cv2 camera as the
+        #     primary source. Release it when the session ends.
+        if not self._use_external:
+            if not self.camera.is_opened():
+                try:
+                    self.camera.open()
+                    if self.camera.is_opened():
+                        logger.info("cv2 camera opened as primary source")
+                except Exception as e:
+                    logger.error(f"cv2 camera open failed: {e}")
+                    return None
+        else:
+            # Ensure cv2 camera is NOT held open from a previous session
+            if self.camera.is_opened():
+                self.camera.release()
+                logger.info("Released stale cv2 camera before WebRTC session")
 
         mode = "demo" if self.demo_mode else "normal"
         self.session_id = self.attendance_db.create_session(class_name, mode)
@@ -146,11 +157,17 @@ class AttendanceEngine:
             self._thread.join(timeout=5.0)
 
         self._compute_final(self.session_id)
-        if not self._use_external:
-            self.camera.release()
+        # ALWAYS release cv2 camera — never leave it dangling
+        self._release_camera()
         self.session_active = False
         self._set_status("Session stopped")
         return self.session_id
+
+    def _release_camera(self):
+        """Unconditionally release the cv2 camera if it was opened."""
+        if self.camera.is_opened():
+            self.camera.release()
+            logger.info("cv2 camera released (session ended)")
 
     def _run_scheduled_checks(self, session_id: str):
         """Background thread: wait for check times, execute checks."""
@@ -169,12 +186,12 @@ class AttendanceEngine:
                 self._set_status("Computing final results")
                 self._compute_final(session_id)
                 self._set_status("Session completed")
-                if not self._use_external:
-                    self.camera.release()
+                self._release_camera()
                 self.session_active = False
         except Exception as e:
             logger.error(f"Session thread error: {e}", exc_info=True)
             self._set_status(f"Error: {e}")
+            self._release_camera()
             self.session_active = False
 
     def _wait_until(self, check_time: int) -> bool:
